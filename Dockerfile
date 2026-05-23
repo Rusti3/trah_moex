@@ -23,18 +23,15 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential \
+        ca-certificates \
         curl \
-        git \
-        libxml2 \
-        libxslt1.1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY arena/requirements-runtime.txt /app/arena/requirements-runtime.txt
 COPY arena/requirements-live.txt /app/arena/requirements-live.txt
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r /app/requirements.txt \
-    && pip install --no-cache-dir -r /app/arena/requirements-live.txt
+    && pip install --no-cache-dir --prefer-binary -r /app/arena/requirements-runtime.txt \
+    && pip install --no-cache-dir --prefer-binary -r /app/arena/requirements-live.txt
 
 COPY . /app
 
