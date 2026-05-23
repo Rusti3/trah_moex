@@ -1,0 +1,468 @@
+sources:
+  # Official company IR / press sources.
+  - id: lukoil_official_releases
+    name: "ЛУКОЙЛ пресс-релизы"
+    type: official_company
+    method: html
+    url: "https://lukoil.ru/PressCenter/Pressreleases"
+    tickers: ["LKOH"]
+    interval_seconds: 30
+    trust_score: 0.93
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/PressCenter/Pressreleases", "/PressCenter/Pressrelease"]
+      max_items: 2
+
+  - id: sber_official_ir
+    name: "Сбербанк IR"
+    type: official_company
+    method: html
+    url: "https://www.sberbank.com/ru/investor-relations"
+    tickers: ["SBER"]
+    interval_seconds: 30
+    trust_score: 0.95
+    enabled: false
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/investor-relations", "/news", "/press"]
+      max_items: 2
+
+  - id: rosneft_official_press
+    name: "Роснефть пресс-релизы"
+    type: official_company
+    method: html
+    url: "https://www.rosneft.ru/press/releases/"
+    tickers: ["ROSN"]
+    interval_seconds: 30
+    trust_score: 0.93
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/press/releases/item/"]
+      link_block_patterns: ["/press/releases/rss", "/press/releases/20"]
+      max_items: 2
+
+  - id: gazprom_official_news
+    name: "Газпром новости"
+    type: official_company
+    method: html
+    url: "https://www.gazprom.ru/press/news/"
+    tickers: ["GAZP"]
+    interval_seconds: 30
+    trust_score: 0.93
+    enabled: false
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/press/news/"]
+      max_items: 2
+
+  - id: vtb_official_ir
+    name: "ВТБ IR"
+    type: official_company
+    method: html
+    url: "https://www.vtb.ru/ir/"
+    tickers: ["VTBR"]
+    interval_seconds: 30
+    trust_score: 0.92
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/ir/news/", "/about/press/news/"]
+      max_items: 2
+
+  - id: yandex_official_ir
+    name: "Яндекс IR пресс-релизы"
+    type: official_company
+    method: html
+    url: "https://ir.yandex.ru/press-releases"
+    tickers: ["YDEX"]
+    interval_seconds: 30
+    trust_score: 0.93
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/press-releases?year="]
+      max_items: 2
+
+  - id: polyus_official_news
+    name: "Полюс новости"
+    type: official_company
+    method: html
+    url: "https://www.polyus.com/ru/media/news/"
+    tickers: ["PLZL"]
+    interval_seconds: 30
+    trust_score: 0.93
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/ru/media/news/"]
+      link_block_patterns: ["?lang="]
+      max_items: 2
+
+  - id: tbank_official_ir
+    name: "Т-Технологии IR"
+    type: official_company
+    method: html
+    url: "https://www.tbank.ru/about/investors/11/"
+    tickers: ["T"]
+    interval_seconds: 30
+    trust_score: 0.92
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/about/news/20", "/about/financial-news/20"]
+      max_items: 2
+
+  - id: novatek_official_releases
+    name: "НОВАТЭК пресс-релизы"
+    type: official_company
+    method: html
+    url: "https://www.novatek.ru/ru/press/releases/"
+    tickers: ["NVTK"]
+    interval_seconds: 30
+    trust_score: 0.93
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/ru/press/releases/index.php?id_4="]
+      link_block_patterns: ["newsFilterFormMode", "from_4=", "/archive/"]
+      max_items: 2
+
+  - id: x5_official_releases
+    name: "X5 пресс-релизы"
+    type: official_company
+    method: html
+    url: "https://www.x5.ru/ru/press-center/press-releases/"
+    tickers: ["X5"]
+    interval_seconds: 30
+    trust_score: 0.92
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/ru/news/"]
+      max_items: 2
+
+  - id: nornickel_official_releases
+    name: "Норникель пресс-релизы"
+    type: official_company
+    method: html
+    url: "https://nornickel.com/news-and-media/press-releases-and-news"
+    tickers: ["GMKN"]
+    interval_seconds: 30
+    trust_score: 0.93
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/news-and-media/press-releases-and-news"]
+      max_items: 2
+
+  - id: magnit_official_releases
+    name: "Магнит пресс-релизы"
+    type: official_company
+    method: html
+    url: "https://www.magnit.com/ru/media/press-releases/"
+    tickers: ["MGNT"]
+    interval_seconds: 30
+    trust_score: 0.92
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/ru/media/press-releases/"]
+      max_items: 2
+
+  - id: alrosa_official_news
+    name: "АЛРОСА новости"
+    type: official_company
+    method: html
+    url: "https://alrosa.ru/press-center/news/"
+    tickers: ["ALRS"]
+    interval_seconds: 30
+    trust_score: 0.93
+    enabled: false
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/press-center/news/"]
+      max_items: 2
+
+  - id: aeroflot_official_ir_news
+    name: "Аэрофлот IR новости"
+    type: official_company
+    method: html
+    url: "https://ir.aeroflot.ru/ru/news/"
+    tickers: ["AFLT"]
+    interval_seconds: 30
+    trust_score: 0.92
+    enabled: false
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/ru/news/"]
+      link_block_patterns: ["/sitemap", "/поис"]
+      max_items: 2
+
+  - id: severstal_official_news
+    name: "Северсталь новости"
+    type: official_company
+    method: html
+    url: "https://severstal.com/rus/media/archive/"
+    tickers: ["CHMF"]
+    interval_seconds: 30
+    trust_score: 0.92
+    enabled: false
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/rus/media/archive/", "/rus/media/news/"]
+      max_items: 2
+
+  - id: nlmk_official_releases
+    name: "НЛМК пресс-релизы"
+    type: official_company
+    method: html
+    url: "https://www.nlmk.com/ru/media-center/press-releases/"
+    tickers: ["NLMK"]
+    interval_seconds: 30
+    trust_score: 0.93
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/ru/media-center/press-releases/"]
+      link_block_patterns: ["?PAGEN_"]
+      max_items: 2
+
+  - id: moex_news
+    name: "Московская биржа новости"
+    type: disclosure
+    method: rss
+    url: "https://www.moex.com/export/news.aspx?lang=ru"
+    tickers: ["MOEX"]
+    interval_seconds: 30
+    trust_score: 0.90
+
+  - id: surgut_official_ir
+    name: "Сургутнефтегаз IR"
+    type: official_company
+    method: html
+    url: "https://www.surgutneftegas.ru/investors/"
+    tickers: ["SNGSP"]
+    interval_seconds: 30
+    trust_score: 0.91
+    enabled: false
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/investors/"]
+      max_items: 2
+
+  - id: mts_official_ir_releases
+    name: "МТС IR релизы"
+    type: official_company
+    method: html
+    url: "https://ir.mts.ru/news_and_events/corporate_releases"
+    tickers: ["MTSS"]
+    interval_seconds: 30
+    trust_score: 0.92
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/news_and_events/corporate_releases"]
+      max_items: 2
+
+  - id: pik_official_news
+    name: "ПИК новости"
+    type: official_company
+    method: html
+    url: "https://pik-group.ru/about/news-and-reports/news/"
+    tickers: ["PIKK"]
+    interval_seconds: 30
+    trust_score: 0.91
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/about/news-and-reports/news/"]
+      max_items: 2
+
+  # Public fast/news feeds from the requested provider list.
+  - id: interfax_public_rss
+    name: "Интерфакс публичная RSS"
+    type: fast_agency
+    method: rss
+    url: "https://www.interfax.ru/rss.asp"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.72
+
+  - id: azipi_disclosure_messages
+    name: "АЗИПИ раскрытие сообщений"
+    type: disclosure
+    method: azipi_disclosure
+    url: "https://e-disclosure.azipi.ru/"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.95
+    parser:
+      max_items: 2
+
+  - id: finam_company_news
+    name: "Финам новости компаний"
+    type: fast_agency
+    method: rss
+    url: "https://www.finam.ru/analysis/conews/rsspoint/"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.70
+
+  - id: finam_market_news
+    name: "Финам рыночные новости"
+    type: fast_agency
+    method: rss
+    url: "https://www.finam.ru/analysis/nslent/rsspoint/"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.68
+
+  - id: rbc_news_rss
+    name: "РБК новости RSS"
+    type: media_analysis
+    method: rss
+    url: "https://rssexport.rbc.ru/rbcnews/news/30/full.rss"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.72
+
+  - id: rftoday_sections
+    name: "RFtoday секции"
+    type: media_analysis
+    method: rftoday
+    url: "https://www.rftoday.ru/"
+    tickers: ["ALL"]
+    interval_seconds: 60
+    trust_score: 0.64
+    parser:
+      max_items: 2
+
+  - id: rbc_investments_candidate
+    name: "РБК Инвестиции кандидат"
+    type: media_analysis
+    method: html
+    url: "https://www.rbc.ru/quote/news"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.75
+    enabled: false
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/quote/news"]
+      max_items: 2
+
+  - id: investing_ru_rss
+    name: "Investing.com RU RSS"
+    type: media_analysis
+    method: rss
+    url: "https://ru.investing.com/rss/news_25.rss"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.62
+
+  - id: tass_rss
+    name: "ТАСС RSS"
+    type: fast_agency
+    method: rss
+    url: "https://tass.ru/rss/v2.xml"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.68
+
+  - id: ria_news
+    name: "РИА Новости RSS"
+    type: fast_agency
+    method: rss
+    url: "https://ria.ru/export/rss2/index.xml"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.68
+
+  # Requested analytical media.
+  - id: vedomosti_news
+    name: "Ведомости RSS"
+    type: media_analysis
+    method: rss
+    url: "https://www.vedomosti.ru/rss/news"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.75
+
+  - id: kommersant_news
+    name: "Коммерсантъ RSS"
+    type: media_analysis
+    method: rss
+    url: "https://www.kommersant.ru/RSS/news.xml"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.75
+
+  - id: forbes_ru_rss
+    name: "Forbes.ru RSS"
+    type: media_analysis
+    method: rss
+    url: "https://www.forbes.ru/newrss.xml"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.66
+
+  - id: banki_ru_news
+    name: "Банки.ру новости"
+    type: media_analysis
+    method: html
+    url: "https://www.banki.ru/news/lenta/"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.64
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/news/lenta/?id="]
+      link_block_patterns: ["bankiru_news_daytheme"]
+      max_items: 2
+
+  - id: investfuture_news
+    name: "InvestFuture новости"
+    type: media_analysis
+    method: html
+    url: "https://investfuture.ru/news"
+    tickers: ["ALL"]
+    interval_seconds: 30
+    trust_score: 0.62
+    parser:
+      list_item_selector: "a[href]"
+      title_selector: "h1"
+      article_selector: "article"
+      link_allow_patterns: ["/news/"]
+      max_items: 2
+

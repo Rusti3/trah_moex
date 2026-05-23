@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Mapping
+
+
+class StateStore:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.initialize()
+
+    def connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
+    def initialize(self) -> None:
+        with self.connect() as conn:
+            conn.executescript(
+                """
+                PRAGMA journal_mode=WAL;
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at_msk TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    as_of_msk TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at_msk TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS orders (
+                    idempotency_key TEXT PRIMARY KEY,
+                    decision_id TEXT NOT NULL,
+                    as_of_msk TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    response_json TEXT,
+                    error TEXT,
+                    created_at_msk TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS selector_returns (
+                    timestamp_msk TEXT PRIMARY KEY,
+                    selector_family_first REAL NOT NULL,
+                    selector_news_aware REAL NOT NULL,
+                    selector_marketwide_news REAL NOT NULL,
+                    created_at_msk TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_positions (
+                    selector TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    weight REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    updated_at_msk TEXT NOT NULL,
+                    PRIMARY KEY(selector, ticker)
+                );
+                """
+            )
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def set_json(self, key: str, value: Mapping[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO bot_state(key, value_json, updated_at_msk)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value_json=excluded.value_json,
+                    updated_at_msk=excluded.updated_at_msk
+                """,
+                (key, json.dumps(value, ensure_ascii=False, default=str), self._now()),
+            )
+
+    def get_json(self, key: str, default: dict | None = None) -> dict:
+        with self.connect() as conn:
+            row = conn.execute("SELECT value_json FROM bot_state WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return default or {}
+        return json.loads(row["value_json"])
+
+    def insert_decision(self, decision_id: str, as_of: str, payload: Mapping[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO decisions(decision_id, as_of_msk, payload_json, created_at_msk)
+                VALUES (?, ?, ?, ?)
+                """,
+                (decision_id, as_of, json.dumps(payload, ensure_ascii=False, default=str), self._now()),
+            )
+
+    def insert_order_attempt(
+        self,
+        *,
+        idempotency_key: str,
+        decision_id: str,
+        as_of: str,
+        ticker: str,
+        direction: str,
+        quantity: int,
+        status: str,
+        request: Mapping[str, Any],
+        response: Mapping[str, Any] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        with self.connect() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO orders(
+                        idempotency_key, decision_id, as_of_msk, ticker, direction, quantity,
+                        status, request_json, response_json, error, created_at_msk
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        idempotency_key,
+                        decision_id,
+                        as_of,
+                        ticker,
+                        direction,
+                        int(quantity),
+                        status,
+                        json.dumps(request, ensure_ascii=False, default=str),
+                        json.dumps(response, ensure_ascii=False, default=str) if response is not None else None,
+                        error,
+                        self._now(),
+                    ),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def count_today_orders(self, date_prefix: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM orders WHERE as_of_msk LIKE ? AND status IN ('submitted','dry_run')",
+                (f"{date_prefix}%",),
+            ).fetchone()
+        return int(row["c"])
+
+    def append_selector_return(self, timestamp: str, returns: Mapping[str, float]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO selector_returns(
+                    timestamp_msk, selector_family_first, selector_news_aware,
+                    selector_marketwide_news, created_at_msk
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    float(returns.get("selector_family_first", 0.0)),
+                    float(returns.get("selector_news_aware", 0.0)),
+                    float(returns.get("selector_marketwide_news", 0.0)),
+                    self._now(),
+                ),
+            )
+
+    def load_selector_history(self, limit: int = 512) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT timestamp_msk, selector_family_first, selector_news_aware, selector_marketwide_news
+                FROM selector_returns
+                ORDER BY timestamp_msk DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        out = []
+        for row in reversed(rows):
+            out.append(
+                {
+                    "timestamp": row["timestamp_msk"],
+                    "selector_family_first": float(row["selector_family_first"]),
+                    "selector_news_aware": float(row["selector_news_aware"]),
+                    "selector_marketwide_news": float(row["selector_marketwide_news"]),
+                }
+            )
+        return out
+
+    def save_paper_positions(self, selector: str, weights: Mapping[str, float], prices: Mapping[str, float], as_of: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM paper_positions WHERE selector = ?", (selector,))
+            conn.executemany(
+                """
+                INSERT INTO paper_positions(selector, ticker, weight, entry_price, updated_at_msk)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (selector, ticker, float(weight), float(prices.get(ticker, 0.0)), as_of)
+                    for ticker, weight in weights.items()
+                    if abs(float(weight)) > 1e-12 and float(prices.get(ticker, 0.0)) > 0
+                ],
+            )
+
+    def load_paper_positions(self) -> dict[str, dict[str, dict[str, float]]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT selector, ticker, weight, entry_price FROM paper_positions"
+            ).fetchall()
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        for row in rows:
+            out.setdefault(row["selector"], {})[row["ticker"]] = {
+                "weight": float(row["weight"]),
+                "entry_price": float(row["entry_price"]),
+            }
+        return out

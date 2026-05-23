@@ -1,0 +1,100 @@
+strategy:
+  name: rolling_rank_weighted_w24_p2
+  lookback_intervals: 24
+  rank_power: 2.0
+  base_selectors:
+    - selector_family_first
+    - selector_news_aware
+    - selector_marketwide_news
+  min_history_intervals: 6
+
+universe:
+  tickers:
+    - LKOH
+    - SBER
+    - ROSN
+    - GAZP
+    - VTBR
+    - YDEX
+    - PLZL
+    - T
+    - NVTK
+    - X5
+    - GMKN
+    - MGNT
+    - ALRS
+    - AFLT
+    - CHMF
+    - NLMK
+    - MOEX
+    - SNGSP
+    - MTSS
+    - PIKK
+
+rebalance:
+  decision_interval_minutes: 30
+  decision_delay_seconds: 90
+  expected_latency_minutes: 1.0
+  max_kronos_wait_seconds: 300
+  target_time_flow:
+    - candle_closed
+    - async_kronos_forecast
+    - async_llm_news_scoring
+    - async_moex_cost_depth
+    - rolling_rank_weighted_selector
+    - order_targets
+
+risk:
+  max_gross_exposure: 1.0
+  allow_long: true
+  allow_short: true
+  default_llm_score_when_missing: 0.5
+  require_no_long_short_overlap_per_ticker: true
+  max_daily_trades: 950
+  min_order_value_rub: 100
+
+environment:
+  polza_api_key_env: POLZA_AI_API_KEY
+  moex_algo_token_env: MOEX_ALGO_TOKEN
+  arenago_api_key_env: SANDBOX_API_KEY
+  secrets_policy: do_not_store_keys_in_repo_or_csv
+
+lot_sizes:
+  GAZP: 10
+  GMKN: 10
+  ALRS: 10
+  AFLT: 10
+  NLMK: 10
+  MOEX: 10
+  SNGSP: 10
+  MTSS: 10
+
+base_selector_params:
+  selector_family_first:
+    kronos_weight: 1.0
+    llm_weight: 1.0
+    threshold: 0.65
+    rank_power: 2.0
+    max_gross: 1.0
+    allow_short: true
+  selector_news_aware:
+    kronos_weight: 1.0
+    llm_weight: 2.0
+    threshold: 0.65
+    rank_power: 2.0
+    max_gross: 1.0
+    allow_short: true
+  selector_marketwide_news:
+    kronos_weight: 0.5
+    llm_weight: 1.0
+    threshold: 0.65
+    rank_power: 2.0
+    max_gross: 1.0
+    allow_short: true
+
+offline_paths:
+  combined_selector_reference_dir: outputs_moex_kronos_top20_selector_v2_combined_family_news
+  selector_eval_dirs:
+    apr1_14: outputs_moex_kronos_top20_selector_v2_jan_may_eval_apr1_14
+    apr14_30: outputs_moex_kronos_top20_selector_v2_jan_may_eval_apr14_30
+    may1_21: outputs_moex_kronos_top20_selector_v2_jan_may_eval_may1_21

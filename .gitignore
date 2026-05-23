@@ -1,0 +1,92 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# Data files (large files)
+*.feather
+*.parquet
+*.h5
+*.hdf5
+*.csv.gz
+outputs*
+algopack_obstats_cache/
+candles_1m_cache/
+llm_news_background_cache.jsonl
+news_*.csv
+roeviy/data/
+
+# Model files (large files)
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.*
+!.env
+!.env.example
+.venv_cuda/
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+*token*
+*secret*
+12.txt
+
+# Temporary files
+*.tmp
+*.temp
+*.bak*
+temp/
+tmp/
+.python-version
