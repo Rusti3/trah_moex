@@ -114,9 +114,13 @@ class ArenaLiveBot:
         self.news_ingestion.initialize()
         self.news_ingestion.start_background()
         try:
+            print("[arena-live] kronos warmup start", flush=True)
+            self.logger.write("kronos_warm_start", {"weights_dir": str(self.settings.weights_dir), "device": self.settings.device})
             self.kronos.warm()
+            print("[arena-live] kronos warmup ok", flush=True)
             self.logger.write("kronos_warm_ok", {})
         except Exception as exc:
+            print(f"[arena-live] kronos warmup error: {exc}", flush=True)
             self.logger.write("kronos_warm_error", {"error": str(exc)})
         self.order_manager.reconcile_positions()
 
