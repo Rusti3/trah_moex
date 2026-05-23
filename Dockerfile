@@ -14,6 +14,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HUGGINGFACE_HUB_CACHE=/data/model_cache/huggingface/hub \
     TRANSFORMERS_CACHE=/data/model_cache/huggingface/transformers \
     TORCH_HOME=/data/model_cache/torch \
+    ARENA_RUNTIME_PYTHON_PACKAGES=/data/python_packages \
+    ARENA_TORCH_SPEC=torch==2.5.1+cpu \
+    ARENA_TORCH_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu \
     KRONOS_WEIGHTS_DIR=/data/model_cache \
     SOURCES_CONFIG_PATH=arena/config/news/sources.yaml \
     TICKERS_CONFIG_PATH=arena/config/news/tickers.yaml \
@@ -35,6 +38,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . /app
 
-RUN mkdir -p /data/logs /data/cache /data/model_cache/huggingface /data/model_cache/torch
+RUN mkdir -p /data/logs /data/cache /data/model_cache/huggingface /data/model_cache/torch /data/python_packages
 
-CMD ["python", "-m", "arena.runtime.live_bot"]
+CMD ["python", "-m", "arena.runtime.bootstrap_live_bot"]

@@ -132,11 +132,24 @@ Live defaults:
 - State is persisted in `/data/arena_state.sqlite3`.
 - News are persisted in `/data/news.sqlite3`.
 - LLM cache is persisted in `/data/llm_cache.jsonl`.
+- Runtime-installed PyTorch is persisted in `/data/python_packages`.
+- Kronos / Hugging Face weights are persisted in `/data/model_cache`.
 - Logs are appended to `/data/logs/*.jsonl`.
 
 The live loop waits for the decision timestamp, runs Kronos, LLM news scoring
 and MOEX cost/depth concurrently, waits up to 5 minutes for Kronos, and then
 falls back to the last good Kronos scores if needed.
+
+PyTorch is bootstrapped at container startup instead of during Docker build:
+
+```text
+python -m arena.runtime.bootstrap_live_bot
+  -> install torch CPU wheel into /data/python_packages if missing
+  -> run python -m arena.runtime.live_bot
+```
+
+The first startup can spend several minutes downloading PyTorch/Kronos weights;
+subsequent restarts reuse `/data`.
 
 Lot handling:
 

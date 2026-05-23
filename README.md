@@ -39,10 +39,16 @@ All mutable runtime data is stored under `/data`:
 - `/data/llm_cache.jsonl`
 - `/data/logs/*.jsonl`
 - `/data/model_cache`
+- `/data/python_packages`
 - `/data/cache`
 
 The bot is designed to reconcile positions and continue after container
 restart.
+
+PyTorch is intentionally not installed into the Docker image at build time.
+The entrypoint installs the CPU wheel into `/data/python_packages` on first
+startup, then reuses it across restarts. Kronos model weights are downloaded by
+the live warmup into `/data/model_cache`.
 
 ## Environment
 
@@ -64,12 +70,12 @@ docker run --env-file .env -v arena-data:/data arena-kronos-live
 The container command is:
 
 ```text
-python -m arena.runtime.live_bot
+python -m arena.runtime.bootstrap_live_bot
 ```
 
 Smoke check:
 
 ```powershell
 python -m unittest discover -s arena\tests
-python -m arena.runtime.live_bot --help
+python -m arena.runtime.bootstrap_live_bot --help
 ```
