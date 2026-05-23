@@ -8,6 +8,13 @@ strategy:
     - selector_marketwide_news
   min_history_intervals: 6
 
+live_selector:
+  mode: lightgbm_rank_weighted
+  min_train_intervals: 48
+  train_lookback_intervals: 512
+  lightgbm_estimators: 60
+  fallback: rolling_rank_weighted_w24_p2
+
 universe:
   tickers:
     - LKOH

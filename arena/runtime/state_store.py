@@ -55,6 +55,11 @@ class StateStore:
                     selector_marketwide_news REAL NOT NULL,
                     created_at_msk TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS market_features (
+                    timestamp_msk TEXT PRIMARY KEY,
+                    features_json TEXT NOT NULL,
+                    created_at_msk TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS paper_positions (
                     selector TEXT NOT NULL,
                     ticker TEXT NOT NULL,
@@ -168,6 +173,56 @@ class StateStore:
                     self._now(),
                 ),
             )
+
+    def save_market_features(self, timestamp: str, features: Mapping[str, float]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO market_features(timestamp_msk, features_json, created_at_msk)
+                VALUES (?, ?, ?)
+                ON CONFLICT(timestamp_msk) DO UPDATE SET
+                    features_json=excluded.features_json,
+                    created_at_msk=excluded.created_at_msk
+                """,
+                (timestamp, json.dumps(features, ensure_ascii=False, default=str), self._now()),
+            )
+
+    def load_lightgbm_training_rows(self, limit: int = 512) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    mf.timestamp_msk,
+                    mf.features_json,
+                    sr.selector_family_first,
+                    sr.selector_news_aware,
+                    sr.selector_marketwide_news
+                FROM market_features mf
+                JOIN selector_returns sr
+                  ON sr.timestamp_msk = mf.timestamp_msk
+                ORDER BY mf.timestamp_msk DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        out = []
+        for row in reversed(rows):
+            try:
+                features = json.loads(row["features_json"])
+            except Exception:
+                features = {}
+            out.append(
+                {
+                    "timestamp": row["timestamp_msk"],
+                    "features": features,
+                    "returns": {
+                        "selector_family_first": float(row["selector_family_first"]),
+                        "selector_news_aware": float(row["selector_news_aware"]),
+                        "selector_marketwide_news": float(row["selector_marketwide_news"]),
+                    },
+                }
+            )
+        return out
 
     def load_selector_history(self, limit: int = 512) -> list[dict[str, Any]]:
         with self.connect() as conn:

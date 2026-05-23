@@ -3,14 +3,14 @@
 `arena/` is the portable production package for the current preferred top-20
 MOEX strategy: **`rolling_rank_weighted_w24_p2`**.
 
-The package is split into two layers:
+The package is split into runtime pieces:
 
-- `runtime/` - clean production API for live decisions.
-- `research_snapshot/` - copied research runners used to reproduce the current
-  results.
+- `runtime/` - production live bot, selector inference, order management.
+- `news_ingestion/` - append-only news ingestion, ticker tagging, story dedupe.
+- `config/` - production and news source configuration.
 
-Heavy outputs, minute candles, ALGOPACK cache, LLM cache, `.env`, API keys, and
-token files are intentionally not copied.
+Heavy outputs, minute candles, ALGOPACK cache, and LLM cache are intentionally
+kept outside the repo and mounted under `/data` in production.
 
 ## Current Reference
 
@@ -48,16 +48,21 @@ candle closed
   -> async LLM daily/news-background scoring
   -> async MOEX cost/depth snapshot
   -> base selector decisions
-  -> RollingRankWeightedSelector(lookback=24, rank_power=2)
+  -> live LightGBM ranks family_first/news_aware/marketwide when enough history exists
+  -> fallback RollingRankWeightedSelector(lookback=24, rank_power=2)
   -> target portfolio weights / orders
 ```
 
-The runtime does not call external services directly.  Production should inject
-providers implementing:
+The live bot calls production providers directly:
 
-- `KronosForecastProvider`
+- `KronosTop20Provider`
 - `LLMNewsScorer`
-- `MoexCostDepthProvider`
+- `MoexRealtimeProvider`
+- `ArenaGoClient`
+
+LightGBM is trained live from saved `/data/arena_state.sqlite3` interval
+features and paper returns. Until there are enough training intervals, the bot
+falls back to `rolling_rank_weighted_w24_p2`.
 
 ## Minimal Runtime Use
 
@@ -93,23 +98,15 @@ orders = result.to_order_targets()
 
 ## Reproduction
 
-Use `offline/` and `research_snapshot/` to reproduce research tables:
-
-```powershell
-python arena/offline/reproduce_combiner.py `
-  --out-dir outputs_moex_kronos_top20_selector_v2_combined_family_news
-```
-
-For the exact historical research commands, use the copied scripts in
-`research_snapshot/` and the external output/cache folders listed in
-`config/production.yaml`.
+Research runners are intentionally not included in the production push. Use the
+main research workspace outputs named in `config/production.yaml` if you need to
+reproduce historical tables.
 
 ## Required Environment
 
-No secrets are stored in this folder.
-
 - `POLZA_AI_API_KEY` for Polza LLM calls.
 - `MOEX_ALGO_TOKEN` for ALGOPACK downloads/repricing.
+- `SANDBOX_API_KEY` for ArenaGo order submission.
 
 If a provider cannot score news, pass neutral LLM scores (`0.5`) and keep a
 separate `news_data_available` flag in upstream features.

@@ -13,8 +13,10 @@ from typing import Any
 
 from .arena_go_client import ArenaGoClient
 from .decision import make_decision
+from .feature_builder import build_live_features
 from .jsonl_logger import JsonlLogger
 from .kronos_provider import KronosTop20Provider
+from .lightgbm_selector import LiveLightGBMSelector
 from .llm_scorer import LLMNewsScorer
 from .market_data_provider import MoexRealtimeProvider
 from .market_hours import is_market_open, next_decision_time, now_msk, sleep_seconds_until
@@ -94,6 +96,14 @@ class ArenaLiveBot:
             lookback=int(strategy.get("lookback_intervals", 24)),
             rank_power=float(strategy.get("rank_power", 2.0)),
         )
+        live_selector = cfg.get("live_selector", {})
+        self.live_selector_mode = str(live_selector.get("mode", "lightgbm_rank_weighted"))
+        self.lightgbm_selector = LiveLightGBMSelector(
+            min_train_intervals=int(live_selector.get("min_train_intervals", 48)),
+            train_lookback_intervals=int(live_selector.get("train_lookback_intervals", 512)),
+            rank_power=float(strategy.get("rank_power", 2.0)),
+            n_estimators=int(live_selector.get("lightgbm_estimators", 60)),
+        )
         self.base_selector_params = {
             **DEFAULT_BASE_SELECTOR_PARAMS,
             **(cfg.get("base_selector_params") or {}),
@@ -172,8 +182,27 @@ class ArenaLiveBot:
 
         prices = {ticker: float(row.get("last_price", 0.0) or 0.0) for ticker, row in cost_depth.items()}
         self._update_paper_selector_returns(as_of_s, prices)
+        market_features = build_live_features(
+            as_of=as_of,
+            kronos_scores=kronos_scores,
+            llm_raw=llm_raw,
+            cost_depth=cost_depth,
+            news_context=news_context,
+            tickers=self.settings.tickers,
+        )
+        self.state.save_market_features(as_of_s, market_features)
 
         base_decisions = self._build_base_decisions(kronos_scores, llm_scores, cost_depth)
+        lightgbm_result = None
+        selector_weights_override = None
+        if self.live_selector_mode == "lightgbm_rank_weighted":
+            training_rows = self.state.load_lightgbm_training_rows(limit=self.lightgbm_selector.train_lookback_intervals)
+            lightgbm_result = self.lightgbm_selector.predict_weights(
+                current_features=market_features,
+                training_rows=training_rows,
+            )
+            if lightgbm_result is not None and lightgbm_result.selector_weights:
+                selector_weights_override = lightgbm_result.selector_weights
         history = {
             "selector_returns": self.state.load_selector_history(limit=512),
             "base_selector_decisions": base_decisions,
@@ -185,6 +214,7 @@ class ArenaLiveBot:
             cost_depth=cost_depth,
             history=history,
             selector=self.selector,
+            selector_weights_override=selector_weights_override,
             max_gross=self.settings.max_gross_exposure,
         )
         decision_id = _decision_id(as_of_s, decision.selector_weights)
@@ -199,6 +229,12 @@ class ArenaLiveBot:
             "as_of": as_of_s,
             "kronos_stale": kronos_stale,
             "selector_weights": dict(decision.selector_weights),
+            "selector_model": {
+                "mode": lightgbm_result.mode if lightgbm_result is not None else "rolling_fallback",
+                "trained_rows": lightgbm_result.trained_rows if lightgbm_result is not None else 0,
+                "scores": lightgbm_result.selector_scores if lightgbm_result is not None else {},
+                "reason": lightgbm_result.reason if lightgbm_result is not None else "",
+            },
             "target_positions": decision.to_order_targets(),
             "orders": order_results,
             "news_rows": sum(len(v) for v in news_context.get("per_ticker_news", {}).values()) + len(news_context.get("marketwide_news", [])),

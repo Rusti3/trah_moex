@@ -53,6 +53,7 @@ def make_decision(
     history: Mapping[str, Any] | list[Mapping[str, Any]],
     *,
     selector: RollingRankWeightedSelector | None = None,
+    selector_weights_override: Mapping[str, float] | None = None,
     max_gross: float = 1.0,
 ) -> DecisionResult:
     """Make a production target portfolio decision.
@@ -67,7 +68,11 @@ def make_decision(
     selector = selector or RollingRankWeightedSelector()
     rows = _history_rows(history)
     base_decisions = _base_decisions(history)
-    selector_weights = selector.weights(rows, as_of=as_of)
+    selector_weights = (
+        {name: float(weight) for name, weight in selector_weights_override.items()}
+        if selector_weights_override is not None
+        else selector.weights(rows, as_of=as_of)
+    )
 
     blended: dict[str, float] = {}
     source_parts: list[str] = []

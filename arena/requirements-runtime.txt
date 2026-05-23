@@ -8,3 +8,4 @@ huggingface_hub==0.33.1
 tqdm==4.67.1
 safetensors==0.6.2
 pyyaml>=6.0
+lightgbm>=4.0
