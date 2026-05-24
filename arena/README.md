@@ -135,6 +135,8 @@ Live defaults:
 - Runtime-installed PyTorch is persisted in `/data/python_packages`.
 - Kronos / Hugging Face weights are persisted in `/data/model_cache`.
 - Logs are appended to `/data/logs/*.jsonl`.
+- Runtime JSONL events are also mirrored to stdout by default
+  (`ARENA_LOG_STDOUT=false` disables this).
 
 The live loop waits for the decision timestamp, runs Kronos, LLM news scoring
 and MOEX cost/depth concurrently, waits up to 5 minutes for Kronos, and then

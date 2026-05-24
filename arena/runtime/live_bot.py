@@ -122,18 +122,30 @@ class ArenaLiveBot:
         except Exception as exc:
             print(f"[arena-live] kronos warmup error: {exc}", flush=True)
             self.logger.write("kronos_warm_error", {"error": str(exc)})
-        self.order_manager.reconcile_positions()
+        positions = self.order_manager.reconcile_positions()
+        self.logger.write("positions_reconciled", {"positions_count": len(positions), "positions": positions})
 
     async def run_forever(self) -> None:
         self.initialize()
         while True:
+            current = now_msk()
             target = next_decision_time(
-                now_msk(),
+                current,
                 interval_minutes=self.settings.decision_interval_minutes,
                 decision_delay_seconds=self.settings.decision_delay_seconds,
             )
-            await asyncio.sleep(sleep_seconds_until(target))
+            sleep_seconds = sleep_seconds_until(target)
+            self.logger.write(
+                "loop_wait",
+                {
+                    "now": current.strftime("%Y-%m-%d %H:%M:%S"),
+                    "next_decision": target.strftime("%Y-%m-%d %H:%M:%S"),
+                    "sleep_seconds": round(sleep_seconds, 3),
+                },
+            )
+            await asyncio.sleep(sleep_seconds)
             try:
+                self.logger.write("run_once_begin", {"as_of": target.strftime("%Y-%m-%d %H:%M:%S")})
                 await self.run_once(target)
             except Exception as exc:
                 self.logger.write("run_once_error", {"error": repr(exc)})
@@ -142,16 +154,37 @@ class ArenaLiveBot:
     async def run_once(self, as_of: datetime | None = None) -> dict[str, Any]:
         as_of = as_of or now_msk()
         as_of_s = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        self.logger.write("run_once_start", {"as_of": as_of_s, "live_orders": self.settings.live_orders})
         if not is_market_open(as_of):
             self.logger.write("market_closed_skip", {"as_of": as_of_s})
             return {"status": "market_closed"}
 
         tag_result = await asyncio.to_thread(self.news_tagger.tag_new_news, as_of, self.settings.tickers)
         news_context = self.news_buffer.get_context(as_of, self.settings.tickers)
+        news_rows = sum(len(v) for v in news_context.get("per_ticker_news", {}).values()) + len(news_context.get("marketwide_news", []))
+        self.logger.write(
+            "news_context_ready",
+            {
+                "as_of": as_of_s,
+                "news_rows": news_rows,
+                "per_ticker_news_rows": sum(len(v) for v in news_context.get("per_ticker_news", {}).values()),
+                "marketwide_news_rows": len(news_context.get("marketwide_news", [])),
+                "news_tagging": tag_result,
+            },
+        )
 
         kronos_task = asyncio.create_task(self.kronos.forecast_bullish_scores(as_of, self.settings.tickers))
         llm_task = asyncio.create_task(self.llm.score_context(news_context, self.settings.tickers))
         moex_task = asyncio.create_task(self.market.current_cost_depth(as_of, self.settings.tickers))
+        self.logger.write(
+            "parallel_tasks_started",
+            {
+                "as_of": as_of_s,
+                "max_kronos_wait_seconds": self.settings.max_kronos_wait_seconds,
+                "max_llm_wait_seconds": self.settings.max_llm_wait_seconds,
+                "max_moex_wait_seconds": self.settings.max_moex_wait_seconds,
+            },
+        )
 
         kronos_stale = False
         try:
@@ -165,6 +198,7 @@ class ArenaLiveBot:
             self.logger.write("kronos_fallback", {"as_of": as_of_s, "error": str(exc)})
         else:
             self.state.set_json("last_good_kronos_scores", dict(kronos_scores))
+            self.logger.write("kronos_scores_ready", _score_summary(as_of_s, kronos_scores))
 
         try:
             llm_raw = await asyncio.wait_for(llm_task, timeout=self.settings.max_llm_wait_seconds)
@@ -176,6 +210,7 @@ class ArenaLiveBot:
             }
             self.logger.write("llm_fallback", {"as_of": as_of_s, "error": str(exc)})
         llm_scores = {ticker: float(row.get("bullish_score", 0.5)) for ticker, row in llm_raw.items()}
+        self.logger.write("llm_scores_ready", _score_summary(as_of_s, llm_scores))
 
         try:
             cost_depth = await asyncio.wait_for(moex_task, timeout=self.settings.max_moex_wait_seconds)
@@ -183,6 +218,16 @@ class ArenaLiveBot:
             moex_task.cancel()
             cost_depth = self.market.last_good_cost_depth or {ticker: {"tradable": True, "last_price": 0.0} for ticker in self.settings.tickers}
             self.logger.write("moex_fallback", {"as_of": as_of_s, "error": str(exc)})
+        else:
+            self.logger.write(
+                "moex_cost_depth_ready",
+                {
+                    "as_of": as_of_s,
+                    "rows": len(cost_depth),
+                    "tradable": sum(1 for row in cost_depth.values() if row.get("tradable", True)),
+                    "priced": sum(1 for row in cost_depth.values() if float(row.get("last_price", 0.0) or 0.0) > 0),
+                },
+            )
 
         prices = {ticker: float(row.get("last_price", 0.0) or 0.0) for ticker, row in cost_depth.items()}
         self._update_paper_selector_returns(as_of_s, prices)
@@ -195,18 +240,40 @@ class ArenaLiveBot:
             tickers=self.settings.tickers,
         )
         self.state.save_market_features(as_of_s, market_features)
+        self.logger.write(
+            "market_features_saved",
+            {
+                "as_of": as_of_s,
+                "feature_count": len(market_features),
+                "total_news_count": market_features.get("total_news_count"),
+                "kronos_spread": market_features.get("kronos_spread"),
+                "llm_spread": market_features.get("llm_spread"),
+            },
+        )
 
         base_decisions = self._build_base_decisions(kronos_scores, llm_scores, cost_depth)
+        self.logger.write("base_decisions_ready", {"as_of": as_of_s, "summary": _base_decision_summary(base_decisions)})
         lightgbm_result = None
         selector_weights_override = None
         if self.live_selector_mode == "lightgbm_rank_weighted":
             training_rows = self.state.load_lightgbm_training_rows(limit=self.lightgbm_selector.train_lookback_intervals)
+            self.logger.write("lightgbm_training_rows_loaded", {"as_of": as_of_s, "rows": len(training_rows)})
             lightgbm_result = self.lightgbm_selector.predict_weights(
                 current_features=market_features,
                 training_rows=training_rows,
             )
             if lightgbm_result is not None and lightgbm_result.selector_weights:
                 selector_weights_override = lightgbm_result.selector_weights
+            self.logger.write(
+                "selector_model_ready",
+                {
+                    "as_of": as_of_s,
+                    "mode": lightgbm_result.mode if lightgbm_result is not None else "rolling_fallback",
+                    "trained_rows": lightgbm_result.trained_rows if lightgbm_result is not None else 0,
+                    "weights": lightgbm_result.selector_weights if lightgbm_result is not None else {},
+                    "reason": lightgbm_result.reason if lightgbm_result is not None else "not_enough_history_or_disabled",
+                },
+            )
         history = {
             "selector_returns": self.state.load_selector_history(limit=512),
             "base_selector_decisions": base_decisions,
@@ -225,7 +292,29 @@ class ArenaLiveBot:
         positions = self.order_manager.reconcile_positions()
         equity = self.order_manager.estimate_equity(positions, prices)
         planned = self.order_manager.plan_orders(decision, positions=positions, prices=prices, equity=equity)
+        self.logger.write(
+            "orders_planned",
+            {
+                "as_of": as_of_s,
+                "equity": equity,
+                "positions_count": len(positions),
+                "planned_count": len(planned),
+                "live_orders": self.settings.live_orders,
+                "orders": [
+                    {"ticker": o.ticker, "direction": o.direction, "quantity": o.quantity, "current": o.current_position, "target": o.target_position}
+                    for o in planned
+                ],
+            },
+        )
         order_results = self.order_manager.execute_orders(decision_id, as_of_s, planned)
+        self.logger.write(
+            "orders_executed",
+            {
+                "as_of": as_of_s,
+                "results_count": len(order_results),
+                "statuses": _status_counts(order_results),
+            },
+        )
 
         self._save_paper_positions(base_decisions, prices, as_of_s)
         payload = {
@@ -241,7 +330,7 @@ class ArenaLiveBot:
             },
             "target_positions": decision.to_order_targets(),
             "orders": order_results,
-            "news_rows": sum(len(v) for v in news_context.get("per_ticker_news", {}).values()) + len(news_context.get("marketwide_news", [])),
+            "news_rows": news_rows,
             "news_tagging": tag_result,
         }
         self.state.insert_decision(decision_id, as_of_s, payload)
@@ -297,6 +386,43 @@ class ArenaLiveBot:
 def _decision_id(as_of: str, selector_weights: dict[str, float]) -> str:
     raw = json.dumps({"as_of": as_of, "selector_weights": selector_weights}, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _score_summary(as_of: str, scores: dict[str, float]) -> dict[str, Any]:
+    values = [float(v) for v in scores.values()]
+    if not values:
+        return {"as_of": as_of, "count": 0}
+    top = sorted(scores.items(), key=lambda kv: float(kv[1]), reverse=True)[:3]
+    bottom = sorted(scores.items(), key=lambda kv: float(kv[1]))[:3]
+    return {
+        "as_of": as_of,
+        "count": len(scores),
+        "min": min(values),
+        "max": max(values),
+        "top3": [{"ticker": ticker, "score": float(score)} for ticker, score in top],
+        "bottom3": [{"ticker": ticker, "score": float(score)} for ticker, score in bottom],
+    }
+
+
+def _base_decision_summary(base_decisions: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    out = {}
+    for selector, row in base_decisions.items():
+        weights = {str(k): float(v) for k, v in (row.get("target_weights") or {}).items()}
+        out[selector] = {
+            "positions": len(weights),
+            "long": sum(1 for value in weights.values() if value > 0),
+            "short": sum(1 for value in weights.values() if value < 0),
+            "gross": sum(abs(value) for value in weights.values()),
+        }
+    return out
+
+
+def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status", "unknown"))
+        out[status] = out.get(status, 0) + 1
+    return out
 
 
 def parse_args() -> argparse.Namespace:

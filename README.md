@@ -60,6 +60,10 @@ The deployment reads credentials from `.env` / environment variables:
 
 Runtime defaults are in `arena/config/production.yaml`.
 
+Operational logs are written to `/data/logs/arena_live_YYYYMMDD.jsonl` and are
+mirrored to container stdout by default. Set `ARENA_LOG_STDOUT=false` to keep
+them file-only.
+
 ## Run
 
 ```powershell
