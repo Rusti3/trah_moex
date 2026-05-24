@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -9,15 +10,17 @@ import pandas as pd
 
 from arena.runtime.feature_builder import build_live_features
 from arena.runtime.history_bootstrap import HistoryBootstrapService
+from arena.runtime.jsonl_logger import JsonlLogger, redact
 from arena.runtime.lightgbm_selector import rank_weights_from_scores
 from arena.runtime import RollingRankWeightedSelector, build_target_weights, make_decision
 from arena.runtime.llm_scorer import LLMNewsScorer, _hash_payload
 from arena.runtime.market_history import MarketHistoryCache
-from arena.runtime.news_service import NewsBuffer, ensure_live_news_schema
+from arena.runtime.news_service import NewsBuffer, NewsIngestionLogAggregator, ensure_live_news_schema
 from arena.runtime.order_manager import OrderManager
 from arena.runtime.schemas import DecisionResult, TargetPosition
 from arena.runtime.settings import load_settings
 from arena.runtime.state_store import StateStore
+from news_ingestion.pipeline import SourceRunStats
 
 
 class RuntimeTests(unittest.TestCase):
@@ -366,6 +369,46 @@ class RuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(result.rows_after, 4)
         self.assertGreaterEqual(len(rows), 4)
         self.assertTrue(all(row["timestamp"] < "2026-05-21 13:00:00" for row in rows))
+
+    def test_jsonl_logger_redacts_secrets(self):
+        with TemporaryDirectory(ignore_cleanup_errors=True) as tmp, patch.dict("os.environ", {"ARENA_LOG_STDOUT": "false"}):
+            logger = JsonlLogger(f"{tmp}/logs")
+            logger.write(
+                "secret_test",
+                {
+                    "api_key": "pza_testSecretToken",
+                    "nested": {"authorization": "Bearer verysecretvalue"},
+                    "message": "token pza_anotherSecret should be hidden",
+                },
+            )
+            text = next((Path(tmp) / "logs").glob("arena_live_*.jsonl")).read_text(encoding="utf-8")
+        self.assertNotIn("pza_testSecretToken", text)
+        self.assertNotIn("verysecretvalue", text)
+        self.assertNotIn("pza_anotherSecret", text)
+        self.assertIn("[REDACTED]", text)
+        self.assertEqual(redact({"token": "abc"})["token"], "[REDACTED]")
+
+    def test_news_ingestion_log_aggregator_throttles_until_interval(self):
+        with TemporaryDirectory(ignore_cleanup_errors=True) as tmp, patch.dict("os.environ", {"ARENA_LOG_STDOUT": "false"}):
+            db = Path(tmp) / "news.sqlite3"
+            ensure_live_news_schema(db)
+            logger = JsonlLogger(Path(tmp) / "logs")
+            aggregator = NewsIngestionLogAggregator(database_path=db, logger=logger, interval_seconds=1800)
+            stats = SourceRunStats(source_id="src", fetched=2, selected=1, saved=1, duplicates=1)
+            stats.finish()
+            aggregator.observe(stats)
+            self.assertFalse(list((Path(tmp) / "logs").glob("news_ingestion_*.jsonl")))
+            aggregator._last_emit -= 1801
+            stats2 = SourceRunStats(source_id="src", fetched=3, selected=2, saved=0, duplicates=2, errors=["temporary"])
+            stats2.finish()
+            aggregator.observe(stats2)
+            news_logs = list((Path(tmp) / "logs").glob("news_ingestion_*.jsonl"))
+            error_logs = list((Path(tmp) / "logs").glob("errors_*.jsonl"))
+            payload = news_logs[0].read_text(encoding="utf-8")
+        self.assertEqual(len(news_logs), 1)
+        self.assertEqual(len(error_logs), 1)
+        self.assertIn('"runs": 2', payload)
+        self.assertIn('"news_db_count": 0', payload)
 
 
 if __name__ == "__main__":

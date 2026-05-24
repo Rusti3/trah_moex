@@ -20,6 +20,13 @@ history_bootstrap:
   background_intervals: 512
   time_budget_seconds: 180
 
+logging:
+  news_log_interval_seconds: 1800
+  health_log_interval_seconds: 300
+  log_level: info
+  log_stdout: true
+  log_full_payloads: false
+
 universe:
   tickers:
     - LKOH

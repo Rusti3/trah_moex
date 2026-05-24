@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import sys
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,10 +19,10 @@ if str(ARENA_DIR) not in sys.path:
     sys.path.insert(0, str(ARENA_DIR))
 
 from news_ingestion.config import SourceRegistry  # type: ignore  # noqa: E402
-from news_ingestion.pipeline import IngestionPipeline  # type: ignore  # noqa: E402
+from news_ingestion.pipeline import IngestionPipeline, SourceRunStats  # type: ignore  # noqa: E402
 from news_ingestion.scheduler import create_scheduler  # type: ignore  # noqa: E402
 from news_ingestion.settings import Settings  # type: ignore  # noqa: E402
-from news_ingestion.storage import connect, initialize_database  # type: ignore  # noqa: E402
+from news_ingestion.storage import connect, count_news, initialize_database  # type: ignore  # noqa: E402
 from news_ingestion.tickers import TickerRegistry, tag_existing_news  # type: ignore  # noqa: E402
 
 try:
@@ -139,6 +141,126 @@ def _json_list(value: str) -> list[Any]:
         return parsed if isinstance(parsed, list) else []
     except Exception:
         return []
+
+
+class NewsIngestionLogAggregator:
+    """Rate-limited structured diagnostics for the 30s news parser loop."""
+
+    def __init__(
+        self,
+        *,
+        database_path: str | Path,
+        logger: Any | None,
+        interval_seconds: int = 1800,
+    ):
+        self.database_path = Path(database_path)
+        self.logger = logger
+        self.interval_seconds = max(int(interval_seconds), 1)
+        self._lock = threading.Lock()
+        self._last_emit = time.monotonic()
+        self._window_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._runs = 0
+        self._totals = defaultdict(int)
+        self._sources: dict[str, dict[str, Any]] = {}
+        self._errors: list[dict[str, Any]] = []
+
+    def observe(self, stats: SourceRunStats) -> None:
+        should_emit = False
+        with self._lock:
+            self._runs += 1
+            source = self._sources.setdefault(
+                stats.source_id,
+                {
+                    "runs": 0,
+                    "fetched": 0,
+                    "selected": 0,
+                    "saved": 0,
+                    "duplicates": 0,
+                    "skipped": 0,
+                    "errors": 0,
+                    "last_duration_seconds": None,
+                    "last_finished_at": None,
+                },
+            )
+            source["runs"] += 1
+            for key in ("fetched", "selected", "saved", "duplicates", "skipped"):
+                value = int(getattr(stats, key, 0) or 0)
+                source[key] += value
+                self._totals[key] += value
+            source["errors"] += len(stats.errors or [])
+            source["last_duration_seconds"] = stats.duration_seconds
+            source["last_finished_at"] = _format_utc(stats.finished_at)
+            self._totals["errors"] += len(stats.errors or [])
+            for error in stats.errors or []:
+                if len(self._errors) < 20:
+                    self._errors.append({"source_id": stats.source_id, "error": str(error)[:500]})
+            should_emit = (time.monotonic() - self._last_emit) >= self.interval_seconds
+        if should_emit:
+            self.emit()
+
+    def emit(self, *, force: bool = False, event: str = "news_ingestion_summary") -> None:
+        if self.logger is None:
+            return
+        with self._lock:
+            if not force and (time.monotonic() - self._last_emit) < self.interval_seconds:
+                return
+            payload = {
+                "window_started_at_msk": self._window_started_at,
+                "window_seconds": round(time.monotonic() - self._last_emit, 3),
+                "runs": self._runs,
+                "totals": dict(self._totals),
+                "sources": self._sources,
+                "errors_sample": self._errors,
+                **_news_db_summary(self.database_path),
+            }
+            errors = list(self._errors)
+            self._last_emit = time.monotonic()
+            self._window_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._runs = 0
+            self._totals = defaultdict(int)
+            self._sources = {}
+            self._errors = []
+        self.logger.write(event, payload, stream="news_ingestion")
+        if errors:
+            self.logger.error("news_ingestion_errors_summary", {**payload, "errors_sample": errors})
+
+    def log_scheduler_error(self, payload: dict[str, Any]) -> None:
+        if self.logger is not None:
+            self.logger.error("news_scheduler_error", {**payload, **_news_db_summary(self.database_path)})
+
+
+def _format_utc(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _news_db_summary(database_path: str | Path) -> dict[str, Any]:
+    summary = {
+        "news_db_count": 0,
+        "news_llm_tags_count": 0,
+        "latest_received_at_msk": None,
+        "latest_published_at_msk": None,
+    }
+    try:
+        summary["news_db_count"] = count_news(database_path)
+        with connect(database_path) as conn:
+            latest = conn.execute(
+                """
+                SELECT received_at_msk, published_at_msk
+                FROM news
+                ORDER BY received_at_msk DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if latest is not None:
+                summary["latest_received_at_msk"] = latest["received_at_msk"]
+                summary["latest_published_at_msk"] = latest["published_at_msk"]
+            tags = conn.execute("SELECT COUNT(*) AS c FROM news_llm_tags").fetchone()
+            summary["news_llm_tags_count"] = int(tags["c"] if tags else 0)
+    except Exception as exc:
+        summary["news_db_error"] = str(exc)[:500]
+    return summary
 
 
 class LLMNewsTagger:
@@ -383,9 +505,12 @@ class NewsIngestionService:
     sources_config_path: Path
     tickers_config_path: Path
     bootstrap_enabled: bool = True
+    logger: Any | None = None
+    news_log_interval_seconds: int = 1800
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _scheduler: Any | None = field(default=None, init=False, repr=False)
+    _log_aggregator: NewsIngestionLogAggregator | None = field(default=None, init=False, repr=False)
 
     def settings(self) -> Settings:
         return Settings(
@@ -424,13 +549,40 @@ class NewsIngestionService:
         asyncio.run(self._run_async())
 
     async def _run_async(self) -> None:
+        logging.getLogger("apscheduler.executors.default").setLevel(logging.ERROR)
+        logging.getLogger("apscheduler.scheduler").setLevel(logging.ERROR)
         settings = self.settings()
         registry = SourceRegistry.load(settings.sources_config_path)
         pipeline = IngestionPipeline(registry, settings)
         pipeline.initialize()
+        self._log_aggregator = NewsIngestionLogAggregator(
+            database_path=settings.database_path,
+            logger=self.logger,
+            interval_seconds=self.news_log_interval_seconds,
+        )
+        if self.logger is not None:
+            self.logger.write(
+                "news_ingestion_started",
+                {
+                    "database_path": str(settings.database_path),
+                    "sources_config_path": str(settings.sources_config_path),
+                    "tickers_config_path": str(settings.tickers_config_path),
+                    "source_count": len(pipeline.enabled_sources()),
+                    "log_interval_seconds": self.news_log_interval_seconds,
+                    **_news_db_summary(settings.database_path),
+                },
+                stream="news_ingestion",
+            )
         if settings.bootstrap_enabled:
-            await pipeline.bootstrap()
-        scheduler = create_scheduler(pipeline)
+            bootstrap_stats = await pipeline.bootstrap()
+            for stats in bootstrap_stats:
+                self._log_aggregator.observe(stats)
+            self._log_aggregator.emit(force=True, event="news_ingestion_bootstrap_summary")
+        scheduler = create_scheduler(
+            pipeline,
+            result_callback=self._log_aggregator.observe,
+            error_callback=self._log_aggregator.log_scheduler_error,
+        )
         self._scheduler = scheduler
         scheduler.start()
         try:

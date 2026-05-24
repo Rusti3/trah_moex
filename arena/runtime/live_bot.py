@@ -23,7 +23,7 @@ from .llm_scorer import LLMNewsScorer
 from .market_history import MarketHistoryCache
 from .market_data_provider import MoexRealtimeProvider
 from .market_hours import is_market_open, next_decision_time, now_msk, sleep_seconds_until
-from .news_service import LLMNewsTagger, NewsBuffer, NewsIngestionService
+from .news_service import LLMNewsTagger, NewsBuffer, NewsIngestionService, _news_db_summary
 from .order_manager import OrderManager
 from .portfolio import build_target_weights
 from .schemas import BASE_SELECTORS
@@ -71,6 +71,12 @@ class ArenaLiveBot:
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.settings.logs_dir.mkdir(parents=True, exist_ok=True)
         self.logger = JsonlLogger(settings.logs_dir)
+        self.started_at = time.monotonic()
+        self._last_health_emit = 0.0
+        self._last_successful_decision = ""
+        self._last_error = ""
+        self._last_positions_count = 0
+        self._last_cash_balance = 0.0
         self.state = StateStore(settings.state_db_path)
         self.market_history = MarketHistoryCache(settings.market_history_db_path)
         self.client = ArenaGoClient(
@@ -93,6 +99,8 @@ class ArenaLiveBot:
             database_path=settings.news_db_path,
             sources_config_path=settings.news_sources_config_path,
             tickers_config_path=settings.news_tickers_config_path,
+            logger=self.logger,
+            news_log_interval_seconds=settings.news_log_interval_seconds,
         )
         self.news_tagger = LLMNewsTagger(
             settings.news_db_path,
@@ -136,7 +144,21 @@ class ArenaLiveBot:
         )
 
     def initialize(self) -> None:
-        self.logger.write("startup", {"live_orders": self.settings.live_orders, "bot": self.settings.bot_name})
+        self.logger.write(
+            "startup",
+            {
+                "live_orders": self.settings.live_orders,
+                "bot": self.settings.bot_name,
+                "data_dir": str(self.settings.data_dir),
+                "state_db_path": str(self.settings.state_db_path),
+                "market_history_db_path": str(self.settings.market_history_db_path),
+                "news_db_path": str(self.settings.news_db_path),
+                "llm_cache_path": str(self.settings.llm_cache_path),
+                "logs_dir": str(self.settings.logs_dir),
+                "news_log_interval_seconds": self.settings.news_log_interval_seconds,
+                "health_log_interval_seconds": self.settings.health_log_interval_seconds,
+            },
+        )
         self.news_ingestion.initialize()
         self.news_ingestion.start_background()
         bootstrap_result = self.history_bootstrap.bootstrap_initial(
@@ -157,9 +179,12 @@ class ArenaLiveBot:
             self.logger.write("kronos_warm_ok", {})
         except Exception as exc:
             print(f"[arena-live] kronos warmup error: {exc}", flush=True)
-            self.logger.write("kronos_warm_error", {"error": str(exc)})
+            self._last_error = f"kronos_warm_error: {exc}"
+            self.logger.error("kronos_warm_error", {"error": str(exc)})
         positions = self.order_manager.reconcile_positions()
+        self._last_positions_count = len(positions)
         self.logger.write("positions_reconciled", {"positions_count": len(positions), "positions": positions})
+        self._emit_health(force=True, reason="startup")
 
     def shutdown(self) -> None:
         self.news_ingestion.stop_background()
@@ -184,19 +209,22 @@ class ArenaLiveBot:
                     "sleep_seconds": round(sleep_seconds, 3),
                 },
             )
-            await asyncio.sleep(sleep_seconds)
+            await self._sleep_with_health(sleep_seconds, reason="wait_precompute")
             precompute = None
             try:
                 precompute = await self.precompute_once(target)
             except Exception as exc:
-                self.logger.write("precompute_error", {"as_of": target.strftime("%Y-%m-%d %H:%M:%S"), "error": repr(exc)})
-            await asyncio.sleep(sleep_seconds_until(target))
+                self._last_error = f"precompute_error: {exc!r}"
+                self.logger.error("precompute_error", {"as_of": target.strftime("%Y-%m-%d %H:%M:%S"), "error": repr(exc)})
+            await self._sleep_with_health(sleep_seconds_until(target), reason="wait_decision")
             try:
                 self.logger.write("run_once_begin", {"as_of": target.strftime("%Y-%m-%d %H:%M:%S")})
                 await self.run_once(target, precompute=precompute)
             except Exception as exc:
-                self.logger.write("run_once_error", {"error": repr(exc)})
+                self._last_error = f"run_once_error: {exc!r}"
+                self.logger.error("run_once_error", {"error": repr(exc)})
                 await asyncio.sleep(5)
+            self._emit_health(reason="loop")
 
     async def precompute_once(self, as_of: datetime) -> PrecomputeSnapshot:
         as_of_s = as_of.strftime("%Y-%m-%d %H:%M:%S")
@@ -238,8 +266,10 @@ class ArenaLiveBot:
                 result = await asyncio.wait_for(task, timeout=max(1, min(30, self.settings.precompute_seconds)))
                 if name == "positions":
                     snapshot.positions = result
+                    self._last_positions_count = len(result or {})
                 elif name == "bot":
                     snapshot.bot_snapshot = result
+                    self._last_cash_balance = float(getattr(result, "cash_balance", 0.0) or 0.0)
                 elif name == "history":
                     snapshot.market_history_rows_added = sum(int(v) for v in (result or {}).values())
                 elif name == "cost_depth":
@@ -286,7 +316,8 @@ class ArenaLiveBot:
             candle_rows_added = sum(int(v) for v in candle_rows.values())
             self.logger.write("candle_append_ready", {"as_of": as_of_s, "rows_added": candle_rows_added, "elapsed_ms": _elapsed_ms(candle_started)})
         except Exception as exc:
-            self.logger.write("candle_append_error", {"as_of": as_of_s, "error": str(exc), "elapsed_ms": _elapsed_ms(candle_started)})
+            self._last_error = f"candle_append_error: {exc}"
+            self.logger.error("candle_append_error", {"as_of": as_of_s, "error": str(exc), "elapsed_ms": _elapsed_ms(candle_started)})
 
         tag_result = await asyncio.to_thread(self.news_tagger.tag_new_news, as_of, self.settings.tickers)
         news_context = self.news_buffer.get_context(as_of, self.settings.tickers)
@@ -451,6 +482,8 @@ class ArenaLiveBot:
         positions = precompute.positions if precompute is not None and precompute.positions is not None else self.order_manager.reconcile_positions()
         bot_snapshot = precompute.bot_snapshot if precompute is not None and precompute.bot_snapshot is not None else self.order_manager.bot_snapshot()
         cash_balance = bot_snapshot.cash_balance
+        self._last_positions_count = len(positions)
+        self._last_cash_balance = float(cash_balance)
         equity = self.order_manager.estimate_equity(positions, prices, cash_balance=cash_balance)
         planned = self.order_manager.plan_orders(
             decision,
@@ -529,6 +562,8 @@ class ArenaLiveBot:
         }
         self.state.insert_decision(decision_id, as_of_s, payload)
         self.logger.write("decision", payload)
+        self._last_successful_decision = as_of_s
+        self._emit_health(reason="decision")
         return payload
 
     def _build_base_decisions(self, kronos_scores, llm_scores, cost_depth) -> dict[str, dict[str, Any]]:
@@ -576,6 +611,45 @@ class ArenaLiveBot:
             self.state.save_paper_positions(selector_name, decision.get("target_weights", {}), prices, as_of_s)
         self.state.set_json("paper_last_as_of", {"as_of": as_of_s})
 
+    def _emit_health(self, *, force: bool = False, reason: str = "") -> None:
+        now = time.monotonic()
+        if not force and now - self._last_health_emit < self.settings.health_log_interval_seconds:
+            return
+        self._last_health_emit = now
+        current = now_msk()
+        try:
+            next_decision = next_decision_time(
+                current,
+                interval_minutes=self.settings.decision_interval_minutes,
+                decision_delay_seconds=self.settings.candle_close_wait_seconds,
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            next_decision = ""
+        payload = {
+            "reason": reason,
+            "uptime_seconds": round(now - self.started_at, 3),
+            "market_open": is_market_open(current),
+            "next_decision": next_decision,
+            "last_successful_decision": self._last_successful_decision,
+            "last_error": self._last_error,
+            "positions_count": self._last_positions_count,
+            "cash_balance": self._last_cash_balance,
+            "selector_training_rows": self.state.count_lightgbm_training_rows(),
+            "selector_return_rows": self.state.count_selector_returns(),
+            "market_history_30m_timestamps": self.market_history.timestamp_count(interval_minutes=30),
+            "market_history_60m_timestamps": self.market_history.timestamp_count(interval_minutes=60),
+            **_news_db_summary(self.settings.news_db_path),
+        }
+        self.logger.health("runtime_health", payload)
+
+    async def _sleep_with_health(self, seconds: float, *, reason: str) -> None:
+        remaining = max(float(seconds), 0.0)
+        while remaining > 0:
+            chunk = min(remaining, max(float(self.settings.health_log_interval_seconds), 1.0))
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+            self._emit_health(reason=reason)
+
 
 def _decision_id(as_of: str, selector_weights: dict[str, float]) -> str:
     raw = json.dumps({"as_of": as_of, "selector_weights": selector_weights}, sort_keys=True)
@@ -607,6 +681,16 @@ def _base_decision_summary(base_decisions: dict[str, dict[str, Any]]) -> dict[st
             "long": sum(1 for value in weights.values() if value > 0),
             "short": sum(1 for value in weights.values() if value < 0),
             "gross": sum(abs(value) for value in weights.values()),
+            "top_longs": [
+                {"ticker": ticker, "weight": weight}
+                for ticker, weight in sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
+                if weight > 0
+            ][:3],
+            "top_shorts": [
+                {"ticker": ticker, "weight": weight}
+                for ticker, weight in sorted(weights.items(), key=lambda kv: kv[1])
+                if weight < 0
+            ][:3],
         }
     return out
 

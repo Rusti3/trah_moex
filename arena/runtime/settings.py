@@ -45,6 +45,8 @@ class RuntimeSettings:
     news_db_path: Path
     llm_cache_path: Path
     logs_dir: Path
+    news_log_interval_seconds: int
+    health_log_interval_seconds: int
     production_config_path: Path
     news_sources_config_path: Path
     news_tickers_config_path: Path
@@ -112,6 +114,8 @@ def load_settings(config_path: str | Path | None = None) -> RuntimeSettings:
         news_db_path=Path(os.environ.get("DATABASE_PATH", str(data_dir / "news.sqlite3"))),
         llm_cache_path=Path(os.environ.get("ARENA_LLM_CACHE", str(data_dir / "llm_cache.jsonl"))),
         logs_dir=Path(os.environ.get("ARENA_LOGS_DIR", str(data_dir / "logs"))),
+        news_log_interval_seconds=int(os.environ.get("ARENA_NEWS_LOG_INTERVAL_SECONDS", cfg.get("logging", {}).get("news_log_interval_seconds", 1800))),
+        health_log_interval_seconds=int(os.environ.get("ARENA_HEALTH_LOG_INTERVAL_SECONDS", cfg.get("logging", {}).get("health_log_interval_seconds", 300))),
         production_config_path=config,
         news_sources_config_path=Path(os.environ.get("SOURCES_CONFIG_PATH", "arena/config/news/sources.yaml")),
         news_tickers_config_path=Path(os.environ.get("TICKERS_CONFIG_PATH", "arena/config/news/tickers.yaml")),
