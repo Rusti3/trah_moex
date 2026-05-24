@@ -15,11 +15,12 @@ from .state_store import StateStore
 class PlannedOrder:
     ticker: str
     direction: str
-    quantity: int
-    current_position: int
-    target_position: int
+    quantity: int  # ArenaGo quantity is lots.
+    current_position: int  # lots
+    target_position: int  # lots
     price: float
     target_weight: float
+    lot_size: int
 
 
 class OrderManager:
@@ -61,7 +62,10 @@ class OrderManager:
 
     def estimate_equity(self, positions: Mapping[str, int], prices: Mapping[str, float]) -> float:
         cash = self._cash_balance()
-        gross = sum(int(qty) * float(prices.get(ticker, 0.0) or 0.0) for ticker, qty in positions.items())
+        gross = sum(
+            abs(int(lots)) * self.lot_sizes.get(ticker, 1) * float(prices.get(ticker, 0.0) or 0.0)
+            for ticker, lots in positions.items()
+        )
         return max(cash + gross, 0.0) if cash > 0 else max(gross, 100000.0)
 
     def plan_orders(
@@ -82,13 +86,13 @@ class OrderManager:
             lot = self.lot_sizes.get(ticker, 1)
             target_weight = float(target_by_ticker.get(ticker, 0.0))
             target_shares_raw = equity * target_weight / price
-            target_shares = _round_to_lot(target_shares_raw, lot)
+            target_lots = _shares_to_lots(target_shares_raw, lot)
             current = int(positions.get(ticker, 0))
-            delta = target_shares - current
+            delta = target_lots - current
             if delta == 0:
                 continue
             quantity = abs(delta)
-            if quantity * price < self.min_order_value_rub:
+            if quantity * lot * price < self.min_order_value_rub:
                 continue
             planned.append(
                 PlannedOrder(
@@ -96,9 +100,10 @@ class OrderManager:
                     direction="B" if delta > 0 else "S",
                     quantity=quantity,
                     current_position=current,
-                    target_position=target_shares,
+                    target_position=target_lots,
                     price=price,
                     target_weight=target_weight,
+                    lot_size=lot,
                 )
             )
         return planned
@@ -166,11 +171,11 @@ class OrderManager:
         return 0.0
 
 
-def _round_to_lot(shares: float, lot: int) -> int:
+def _shares_to_lots(shares: float, lot: int) -> int:
     if not math.isfinite(shares) or shares == 0:
         return 0
     sign = 1 if shares > 0 else -1
-    return sign * int(math.floor(abs(shares) / lot) * lot)
+    return sign * int(math.floor(abs(shares) / lot))
 
 
 def _idempotency_key(decision_id: str, request: Mapping[str, Any]) -> str:

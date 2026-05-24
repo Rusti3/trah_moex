@@ -301,7 +301,14 @@ class ArenaLiveBot:
                 "planned_count": len(planned),
                 "live_orders": self.settings.live_orders,
                 "orders": [
-                    {"ticker": o.ticker, "direction": o.direction, "quantity": o.quantity, "current": o.current_position, "target": o.target_position}
+                    {
+                        "ticker": o.ticker,
+                        "direction": o.direction,
+                        "quantity_lots": o.quantity,
+                        "lot_size": o.lot_size,
+                        "current_lots": o.current_position,
+                        "target_lots": o.target_position,
+                    }
                     for o in planned
                 ],
             },

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+from tempfile import TemporaryDirectory
 import unittest
 
 from arena.runtime.feature_builder import build_live_features
 from arena.runtime.lightgbm_selector import rank_weights_from_scores
 from arena.runtime import RollingRankWeightedSelector, build_target_weights, make_decision
+from arena.runtime.llm_scorer import LLMNewsScorer
+from arena.runtime.order_manager import OrderManager
+from arena.runtime.schemas import DecisionResult, TargetPosition
 
 
 class RuntimeTests(unittest.TestCase):
@@ -134,6 +138,61 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(features["ticker_news_total"], 1.0)
         self.assertEqual(features["marketwide_news_count"], 1.0)
         self.assertGreater(features["kronos_spread"], 0.0)
+
+    def test_llm_prompt_schema_is_per_ticker(self):
+        with TemporaryDirectory() as tmp:
+            scorer = LLMNewsScorer(cache_path=f"{tmp}/llm_cache.jsonl", api_key_env="NO_SUCH_ENV")
+            payload = scorer._prompt_payload(
+                {
+                    "rebalance_timestamp": "2026-05-24 12:31:30",
+                    "date": "2026-05-24",
+                    "per_ticker_news": {"SBER": [{"title": "news"}], "LKOH": []},
+                    "marketwide_news": [],
+                },
+                ("SBER", "LKOH"),
+            )
+        self.assertIn("SBER", payload["schema"])
+        self.assertIn("LKOH", payload["schema"])
+
+    def test_order_manager_sends_lots_not_shares_for_lot_tickers(self):
+        manager = OrderManager(
+            client=None,
+            state=None,
+            bot_name="test",
+            lot_sizes={"ALRS": 10, "SBER": 1},
+            live_orders=False,
+        )
+        decision = DecisionResult(
+            as_of="2026-05-24 12:31:30",
+            selector_weights={},
+            target_positions=(
+                TargetPosition("ALRS", "long", 0.50, 0.50),
+                TargetPosition("SBER", "long", 0.10, 0.10),
+            ),
+        )
+        planned = {order.ticker: order for order in manager.plan_orders(decision, positions={}, prices={"ALRS": 25.0, "SBER": 300.0}, equity=100000.0)}
+        self.assertEqual(planned["ALRS"].quantity, 200)  # 2,000 shares / lot size 10
+        self.assertEqual(planned["ALRS"].target_position, 200)
+        self.assertEqual(planned["ALRS"].lot_size, 10)
+        self.assertEqual(planned["SBER"].quantity, 33)
+
+    def test_order_manager_equity_uses_gross_lot_value(self):
+        class Client:
+            def bots(self):
+                class Response:
+                    ok = True
+                    payload = [{"name": "test", "cash_balance": 50000.0}]
+                return Response()
+
+        manager = OrderManager(
+            client=Client(),
+            state=None,
+            bot_name="test",
+            lot_sizes={"ALRS": 10, "SBER": 1},
+            live_orders=False,
+        )
+        equity = manager.estimate_equity({"ALRS": 100, "SBER": -10}, {"ALRS": 25.0, "SBER": 300.0})
+        self.assertEqual(equity, 78000.0)
 
 
 if __name__ == "__main__":

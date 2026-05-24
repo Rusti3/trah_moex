@@ -119,7 +119,10 @@ class LLMNewsScorer:
     def _prompt_payload(self, context: dict[str, Any], tickers: tuple[str, ...]) -> dict[str, Any]:
         return {
             "task": "For each ticker, score expected intraday bullish impact from known news only. 0=strong bearish, 0.5=neutral, 1=strong bullish.",
-            "schema": {ticker: {"bullish_score": "0..1", "confidence": "0..1", "relation_strength": "0..1", "reason": "short"}} ,
+            "schema": {
+                ticker: {"bullish_score": "0..1", "confidence": "0..1", "relation_strength": "0..1", "reason": "short"}
+                for ticker in tickers
+            },
             "tickers": list(tickers),
             "rebalance_timestamp": context.get("rebalance_timestamp"),
             "date": context.get("date"),
