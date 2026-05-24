@@ -29,11 +29,13 @@ class LiveLightGBMSelector:
         train_lookback_intervals: int = 512,
         rank_power: float = 2.0,
         n_estimators: int = 60,
+        base_selectors: tuple[str, ...] = BASE_SELECTORS,
     ):
         self.min_train_intervals = min_train_intervals
         self.train_lookback_intervals = train_lookback_intervals
         self.rank_power = rank_power
         self.n_estimators = n_estimators
+        self.base_selectors = tuple(base_selectors)
 
     def predict_weights(
         self,
@@ -52,8 +54,8 @@ class LiveLightGBMSelector:
         for row in rows:
             features = row.get("features") or {}
             returns = row.get("returns") or {}
-            for selector_index, selector in enumerate(BASE_SELECTORS):
-                x_train.append(_vector(features, feature_names, selector_index))
+            for selector_index, selector in enumerate(self.base_selectors):
+                x_train.append(_vector(features, feature_names, selector_index, len(self.base_selectors)))
                 y_train.append(_float(returns.get(selector), 0.0))
         if len(set(round(v, 12) for v in y_train)) <= 1:
             return None
@@ -71,28 +73,33 @@ class LiveLightGBMSelector:
             )
             model.fit(x_train, y_train)
             scores = {
-                selector: float(model.predict([_vector(current_features, feature_names, idx)])[0])
-                for idx, selector in enumerate(BASE_SELECTORS)
+                selector: float(model.predict([_vector(current_features, feature_names, idx, len(self.base_selectors))])[0])
+                for idx, selector in enumerate(self.base_selectors)
             }
         except Exception as exc:
             return LightGBMSelectorResult({}, {}, len(rows), mode="fallback", reason=str(exc)[:300])
         return LightGBMSelectorResult(
             selector_scores=scores,
-            selector_weights=rank_weights_from_scores(scores, rank_power=self.rank_power),
+            selector_weights=rank_weights_from_scores(scores, rank_power=self.rank_power, base_selectors=self.base_selectors),
             trained_rows=len(rows),
             mode="lightgbm",
         )
 
 
-def rank_weights_from_scores(scores: Mapping[str, float], *, rank_power: float = 2.0) -> dict[str, float]:
-    order = sorted(BASE_SELECTORS, key=lambda selector: float(scores.get(selector, 0.0)), reverse=True)
+def rank_weights_from_scores(
+    scores: Mapping[str, float],
+    *,
+    rank_power: float = 2.0,
+    base_selectors: tuple[str, ...] = BASE_SELECTORS,
+) -> dict[str, float]:
+    order = sorted(base_selectors, key=lambda selector: float(scores.get(selector, 0.0)), reverse=True)
     raw = [(rank + 1) ** (-rank_power) for rank in range(len(order))]
     total = sum(raw)
     return {selector: value / total for selector, value in zip(order, raw)}
 
 
-def _vector(features: Mapping[str, Any], feature_names: list[str], selector_index: int) -> list[float]:
-    selector_one_hot = [1.0 if selector_index == idx else 0.0 for idx in range(len(BASE_SELECTORS))]
+def _vector(features: Mapping[str, Any], feature_names: list[str], selector_index: int, selector_count: int) -> list[float]:
+    selector_one_hot = [1.0 if selector_index == idx else 0.0 for idx in range(selector_count)]
     return [_float(features.get(name), 0.0) for name in feature_names] + [float(selector_index)] + selector_one_hot
 
 

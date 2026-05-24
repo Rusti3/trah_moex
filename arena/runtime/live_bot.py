@@ -119,9 +119,11 @@ class ArenaLiveBot:
         )
         cfg = load_yaml(settings.production_config_path)
         strategy = cfg.get("strategy", {})
+        self.base_selectors = tuple(str(name) for name in (strategy.get("base_selectors") or BASE_SELECTORS))
         self.selector = RollingRankWeightedSelector(
             lookback=int(strategy.get("lookback_intervals", 24)),
             rank_power=float(strategy.get("rank_power", 2.0)),
+            base_selectors=self.base_selectors,
         )
         live_selector = cfg.get("live_selector", {})
         self.live_selector_mode = str(live_selector.get("mode", "lightgbm_rank_weighted"))
@@ -130,6 +132,7 @@ class ArenaLiveBot:
             train_lookback_intervals=int(live_selector.get("train_lookback_intervals", 512)),
             rank_power=float(strategy.get("rank_power", 2.0)),
             n_estimators=int(live_selector.get("lightgbm_estimators", 60)),
+            base_selectors=self.base_selectors,
         )
         self.base_selector_params = {
             **DEFAULT_BASE_SELECTOR_PARAMS,
@@ -140,6 +143,7 @@ class ArenaLiveBot:
             market_history=self.market_history,
             news_buffer=self.news_buffer,
             tickers=settings.tickers,
+            base_selectors=self.base_selectors,
             base_selector_params=self.base_selector_params,
         )
 
@@ -149,6 +153,8 @@ class ArenaLiveBot:
             {
                 "live_orders": self.settings.live_orders,
                 "bot": self.settings.bot_name,
+                "base_selector_count": len(self.base_selectors),
+                "base_selectors": list(self.base_selectors),
                 "data_dir": str(self.settings.data_dir),
                 "state_db_path": str(self.settings.state_db_path),
                 "market_history_db_path": str(self.settings.market_history_db_path),
@@ -441,7 +447,7 @@ class ArenaLiveBot:
             },
         )
 
-        base_decisions = self._build_base_decisions(kronos_scores, llm_scores, cost_depth)
+        base_decisions = self._build_base_decisions(as_of, kronos_scores, llm_scores, cost_depth)
         self.logger.write("base_decisions_ready", {"as_of": as_of_s, "summary": _base_decision_summary(base_decisions)})
         lightgbm_result = None
         selector_weights_override = None
@@ -566,10 +572,21 @@ class ArenaLiveBot:
         self._emit_health(reason="decision")
         return payload
 
-    def _build_base_decisions(self, kronos_scores, llm_scores, cost_depth) -> dict[str, dict[str, Any]]:
+    def _build_base_decisions(self, as_of: datetime, kronos_scores, llm_scores, cost_depth) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
-        for selector_name in BASE_SELECTORS:
-            params = dict(self.base_selector_params.get(selector_name, DEFAULT_BASE_SELECTOR_PARAMS[selector_name]))
+        stored_positions = self.state.load_paper_positions()
+        for selector_name in self.base_selectors:
+            params = dict(self.base_selector_params.get(selector_name, DEFAULT_BASE_SELECTOR_PARAMS.get(selector_name, {})))
+            if not _selector_due(as_of, int(float(params.get("rebalance_minutes", 30)))) and selector_name in stored_positions:
+                out[selector_name] = {
+                    **params,
+                    "target_weights": {
+                        ticker: float(row.get("weight", 0.0) or 0.0)
+                        for ticker, row in stored_positions.get(selector_name, {}).items()
+                    },
+                    "held_from_previous_rebalance": True,
+                }
+                continue
             positions = build_target_weights(
                 kronos_scores,
                 llm_scores,
@@ -595,7 +612,7 @@ class ArenaLiveBot:
             return
         positions = self.state.load_paper_positions()
         returns = {}
-        for selector_name in BASE_SELECTORS:
+        for selector_name in self.base_selectors:
             total = 0.0
             for ticker, row in positions.get(selector_name, {}).items():
                 entry = float(row.get("entry_price", 0.0) or 0.0)
@@ -635,6 +652,7 @@ class ArenaLiveBot:
             "positions_count": self._last_positions_count,
             "cash_balance": self._last_cash_balance,
             "selector_training_rows": self.state.count_lightgbm_training_rows(),
+            "selector_training_rows_ready_for_base_selectors": self.state.count_lightgbm_training_rows(required_selectors=self.base_selectors),
             "selector_return_rows": self.state.count_selector_returns(),
             "market_history_30m_timestamps": self.market_history.timestamp_count(interval_minutes=30),
             "market_history_60m_timestamps": self.market_history.timestamp_count(interval_minutes=60),
@@ -732,6 +750,16 @@ def _context_key(context: dict[str, Any] | None) -> str:
 
 def _elapsed_ms(started: float) -> int:
     return int(round((time.monotonic() - started) * 1000))
+
+
+def _selector_due(as_of: datetime, rebalance_minutes: int) -> bool:
+    if rebalance_minutes <= 30:
+        return True
+    anchor_minutes = 12 * 60
+    current_minutes = as_of.hour * 60 + as_of.minute
+    if current_minutes < anchor_minutes:
+        return False
+    return (current_minutes - anchor_minutes) % rebalance_minutes == 0
 
 
 def parse_args() -> argparse.Namespace:

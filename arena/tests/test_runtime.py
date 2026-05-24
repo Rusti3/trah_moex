@@ -11,7 +11,7 @@ import pandas as pd
 from arena.runtime.feature_builder import build_live_features
 from arena.runtime.history_bootstrap import HistoryBootstrapService
 from arena.runtime.jsonl_logger import JsonlLogger, redact
-from arena.runtime.lightgbm_selector import rank_weights_from_scores
+from arena.runtime.lightgbm_selector import LiveLightGBMSelector, rank_weights_from_scores
 from arena.runtime import RollingRankWeightedSelector, build_target_weights, make_decision
 from arena.runtime.llm_scorer import LLMNewsScorer, _hash_payload
 from arena.runtime.market_history import MarketHistoryCache
@@ -135,6 +135,14 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertGreater(weights["selector_news_aware"], weights["selector_family_first"])
         self.assertAlmostEqual(sum(weights.values()), 1.0)
+
+    def test_lightgbm_rank_weights_support_custom_selector_list(self):
+        selectors = ("a", "b", "c", "d")
+        weights = rank_weights_from_scores({"a": 0.1, "b": 0.4, "c": -0.1, "d": 0.2}, base_selectors=selectors)
+        self.assertAlmostEqual(sum(weights.values()), 1.0)
+        self.assertGreater(weights["b"], weights["d"])
+        selector = LiveLightGBMSelector(min_train_intervals=2, base_selectors=selectors)
+        self.assertEqual(selector.base_selectors, selectors)
 
     def test_live_feature_builder_uses_known_current_inputs(self):
         features = build_live_features(
@@ -369,6 +377,31 @@ class RuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(result.rows_after, 4)
         self.assertGreaterEqual(len(rows), 4)
         self.assertTrue(all(row["timestamp"] < "2026-05-21 13:00:00" for row in rows))
+
+    def test_state_store_persists_dynamic_selector_returns(self):
+        with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            state = StateStore(f"{tmp}/state.sqlite3")
+            state.append_selector_return(
+                "2026-05-21 12:00:00",
+                {
+                    "selector_family_first": 0.1,
+                    "selector_nrh_00201": 0.2,
+                    "selector_nrh_00891": -0.3,
+                },
+            )
+            history = state.load_selector_history(limit=5)
+            training = state.load_lightgbm_training_rows(limit=5)
+            ready_rows = state.count_lightgbm_training_rows(required_selectors=("selector_nrh_00201", "selector_nrh_00891"))
+        self.assertEqual(history[0]["selector_nrh_00201"], 0.2)
+        self.assertEqual(history[0]["returns"]["selector_nrh_00891"], -0.3)
+        self.assertEqual(training, [])
+        self.assertEqual(ready_rows, 0)
+
+    def test_production_config_has_thirty_base_selectors(self):
+        settings = load_settings("arena/config/production.yaml")
+        cfg = __import__("arena.runtime.settings", fromlist=["load_yaml"]).load_yaml(settings.production_config_path)
+        self.assertEqual(len(cfg["strategy"]["base_selectors"]), 30)
+        self.assertIn("selector_nrh_00201", cfg["base_selector_params"])
 
     def test_jsonl_logger_redacts_secrets(self):
         with TemporaryDirectory(ignore_cleanup_errors=True) as tmp, patch.dict("os.environ", {"ARENA_LOG_STDOUT": "false"}):

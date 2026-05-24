@@ -53,6 +53,7 @@ class StateStore:
                     selector_family_first REAL NOT NULL,
                     selector_news_aware REAL NOT NULL,
                     selector_marketwide_news REAL NOT NULL,
+                    returns_json TEXT NOT NULL DEFAULT '{}',
                     created_at_msk TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS market_features (
@@ -70,6 +71,9 @@ class StateStore:
                 );
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(selector_returns)").fetchall()}
+            if "returns_json" not in columns:
+                conn.execute("ALTER TABLE selector_returns ADD COLUMN returns_json TEXT NOT NULL DEFAULT '{}'")
 
     @staticmethod
     def _now() -> str:
@@ -156,20 +160,22 @@ class StateStore:
         return int(row["c"])
 
     def append_selector_return(self, timestamp: str, returns: Mapping[str, float]) -> None:
+        clean_returns = {str(k): float(v or 0.0) for k, v in returns.items()}
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO selector_returns(
                     timestamp_msk, selector_family_first, selector_news_aware,
-                    selector_marketwide_news, created_at_msk
+                    selector_marketwide_news, returns_json, created_at_msk
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
-                    float(returns.get("selector_family_first", 0.0)),
-                    float(returns.get("selector_news_aware", 0.0)),
-                    float(returns.get("selector_marketwide_news", 0.0)),
+                    clean_returns.get("selector_family_first", 0.0),
+                    clean_returns.get("selector_news_aware", 0.0),
+                    clean_returns.get("selector_marketwide_news", 0.0),
+                    json.dumps(clean_returns, ensure_ascii=False, default=str),
                     self._now(),
                 ),
             )
@@ -179,7 +185,11 @@ class StateStore:
             row = conn.execute("SELECT COUNT(*) AS c FROM selector_returns").fetchone()
         return int(row["c"] if row else 0)
 
-    def count_lightgbm_training_rows(self) -> int:
+    def count_lightgbm_training_rows(self, required_selectors: tuple[str, ...] | None = None) -> int:
+        if required_selectors:
+            rows = self.load_lightgbm_training_rows(limit=100000)
+            required = set(required_selectors)
+            return sum(1 for row in rows if required.issubset(set((row.get("returns") or {}).keys())))
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -211,6 +221,7 @@ class StateStore:
                 SELECT
                     mf.timestamp_msk,
                     mf.features_json,
+                    sr.returns_json,
                     sr.selector_family_first,
                     sr.selector_news_aware,
                     sr.selector_marketwide_news
@@ -228,15 +239,12 @@ class StateStore:
                 features = json.loads(row["features_json"])
             except Exception:
                 features = {}
+            returns = _selector_returns_from_row(row)
             out.append(
                 {
                     "timestamp": row["timestamp_msk"],
                     "features": features,
-                    "returns": {
-                        "selector_family_first": float(row["selector_family_first"]),
-                        "selector_news_aware": float(row["selector_news_aware"]),
-                        "selector_marketwide_news": float(row["selector_marketwide_news"]),
-                    },
+                    "returns": returns,
                 }
             )
         return out
@@ -245,7 +253,7 @@ class StateStore:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT timestamp_msk, selector_family_first, selector_news_aware, selector_marketwide_news
+                SELECT timestamp_msk, returns_json, selector_family_first, selector_news_aware, selector_marketwide_news
                 FROM selector_returns
                 ORDER BY timestamp_msk DESC
                 LIMIT ?
@@ -254,14 +262,8 @@ class StateStore:
             ).fetchall()
         out = []
         for row in reversed(rows):
-            out.append(
-                {
-                    "timestamp": row["timestamp_msk"],
-                    "selector_family_first": float(row["selector_family_first"]),
-                    "selector_news_aware": float(row["selector_news_aware"]),
-                    "selector_marketwide_news": float(row["selector_marketwide_news"]),
-                }
-            )
+            returns = _selector_returns_from_row(row)
+            out.append({"timestamp": row["timestamp_msk"], **returns, "returns": returns})
         return out
 
     def save_paper_positions(self, selector: str, weights: Mapping[str, float], prices: Mapping[str, float], as_of: str) -> None:
@@ -291,3 +293,20 @@ class StateStore:
                 "entry_price": float(row["entry_price"]),
             }
         return out
+
+
+def _selector_returns_from_row(row: sqlite3.Row) -> dict[str, float]:
+    returns: dict[str, float] = {}
+    try:
+        parsed = json.loads(row["returns_json"] or "{}")
+        if isinstance(parsed, dict):
+            returns.update({str(k): float(v or 0.0) for k, v in parsed.items()})
+    except Exception:
+        returns = {}
+    for key in ("selector_family_first", "selector_news_aware", "selector_marketwide_news"):
+        if key not in returns:
+            try:
+                returns[key] = float(row[key] or 0.0)
+            except Exception:
+                returns[key] = 0.0
+    return returns

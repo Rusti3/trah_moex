@@ -6,6 +6,33 @@ strategy:
     - selector_family_first
     - selector_news_aware
     - selector_marketwide_news
+    - selector_nrh_00201
+    - selector_nrh_00891
+    - selector_nrh_00001
+    - selector_nrh_00646
+    - selector_nrh_00441
+    - selector_nrh_02801
+    - selector_nrh_00681
+    - selector_nrh_00081
+    - selector_nrh_05805
+    - selector_nrh_05801
+    - selector_nrh_01075
+    - selector_nrh_03481
+    - selector_nrh_03740
+    - selector_nrh_05629
+    - selector_nrh_06285
+    - selector_nrh_01321
+    - selector_nrh_02906
+    - selector_nrh_01511
+    - selector_nrh_00121
+    - selector_nrh_06305
+    - selector_nrh_03001
+    - selector_nrh_04401
+    - selector_nrh_04895
+    - selector_nrh_04641
+    - selector_nrh_05605
+    - selector_nrh_00106
+    - selector_nrh_00204
   min_history_intervals: 6
 
 live_selector:
@@ -110,6 +137,276 @@ base_selector_params:
     kronos_weight: 0.5
     llm_weight: 1.0
     threshold: 0.65
+    rank_power: 2.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00201:
+    source_scenario_id: nrh_00201_rb30_k0p25_p0_N0p55_pow0
+    scenario_family: pure_kronos
+    rebalance_minutes: 30
+    kronos_weight: 0.25
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00891:
+    source_scenario_id: nrh_00891_rb30_k1_p3_N0p65_pow0
+    scenario_family: mixed
+    rebalance_minutes: 30
+    kronos_weight: 1.0
+    llm_weight: 3.0
+    threshold: 0.65
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00001:
+    source_scenario_id: nrh_00001_rb30_k0_p0p25_N0p55_pow0
+    scenario_family: pure_llm
+    rebalance_minutes: 30
+    kronos_weight: 0.0
+    llm_weight: 0.25
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00646:
+    source_scenario_id: nrh_00646_rb30_k0p5_p3_N0p6_pow0
+    scenario_family: mixed
+    rebalance_minutes: 30
+    kronos_weight: 0.5
+    llm_weight: 3.0
+    threshold: 0.6
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00441:
+    source_scenario_id: nrh_00441_rb30_k0p5_p0_N0p55_pow0
+    scenario_family: pure_kronos
+    rebalance_minutes: 30
+    kronos_weight: 0.5
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_02801:
+    source_scenario_id: nrh_02801_rb90_k0_p0p25_N0p55_pow0
+    scenario_family: pure_llm
+    rebalance_minutes: 90
+    kronos_weight: 0.0
+    llm_weight: 0.25
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00681:
+    source_scenario_id: nrh_00681_rb30_k1_p0_N0p55_pow0
+    scenario_family: pure_kronos
+    rebalance_minutes: 30
+    kronos_weight: 1.0
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00081:
+    source_scenario_id: nrh_00081_rb30_k0_p1_N0p55_pow0
+    scenario_family: pure_llm
+    rebalance_minutes: 30
+    kronos_weight: 0.0
+    llm_weight: 1.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_05805:
+    source_scenario_id: nrh_05805_rb300_k0p25_p0_N0p55_pow3
+    scenario_family: pure_kronos
+    rebalance_minutes: 300
+    kronos_weight: 0.25
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 3.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_05801:
+    source_scenario_id: nrh_05801_rb300_k0p25_p0_N0p55_pow0
+    scenario_family: pure_kronos
+    rebalance_minutes: 300
+    kronos_weight: 0.25
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_01075:
+    source_scenario_id: nrh_01075_rb30_k2_p1_N0p85_pow3
+    scenario_family: mixed
+    rebalance_minutes: 30
+    kronos_weight: 2.0
+    llm_weight: 1.0
+    threshold: 0.85
+    rank_power: 3.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_03481:
+    source_scenario_id: nrh_03481_rb90_k1_p0_N0p55_pow0
+    scenario_family: pure_kronos
+    rebalance_minutes: 90
+    kronos_weight: 1.0
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_03740:
+    source_scenario_id: nrh_03740_rb90_k2_p0_N0p7_pow3
+    scenario_family: pure_kronos
+    rebalance_minutes: 90
+    kronos_weight: 2.0
+    llm_weight: 0.0
+    threshold: 0.7
+    rank_power: 3.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_05629:
+    source_scenario_id: nrh_05629_rb300_k0_p0p25_N0p8_pow2
+    scenario_family: pure_llm
+    rebalance_minutes: 300
+    kronos_weight: 0.0
+    llm_weight: 0.25
+    threshold: 0.8
+    rank_power: 2.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_06285:
+    source_scenario_id: nrh_06285_rb300_k1_p0_N0p55_pow3
+    scenario_family: pure_kronos
+    rebalance_minutes: 300
+    kronos_weight: 1.0
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 3.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_01321:
+    source_scenario_id: nrh_01321_rb30_k3_p2_N0p55_pow0
+    scenario_family: mixed
+    rebalance_minutes: 30
+    kronos_weight: 3.0
+    llm_weight: 2.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_02906:
+    source_scenario_id: nrh_02906_rb90_k0_p1_N0p8_pow0
+    scenario_family: pure_llm
+    rebalance_minutes: 90
+    kronos_weight: 0.0
+    llm_weight: 1.0
+    threshold: 0.8
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_01511:
+    source_scenario_id: nrh_01511_rb60_k0_p1_N0p85_pow0
+    scenario_family: pure_llm
+    rebalance_minutes: 60
+    kronos_weight: 0.0
+    llm_weight: 1.0
+    threshold: 0.85
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00121:
+    source_scenario_id: nrh_00121_rb30_k0_p2_N0p55_pow0
+    scenario_family: pure_llm
+    rebalance_minutes: 30
+    kronos_weight: 0.0
+    llm_weight: 2.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_06305:
+    source_scenario_id: nrh_06305_rb300_k1_p0_N0p75_pow3
+    scenario_family: pure_kronos
+    rebalance_minutes: 300
+    kronos_weight: 1.0
+    llm_weight: 0.0
+    threshold: 0.75
+    rank_power: 3.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_03001:
+    source_scenario_id: nrh_03001_rb90_k0p25_p0_N0p55_pow0
+    scenario_family: pure_kronos
+    rebalance_minutes: 90
+    kronos_weight: 0.25
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_04401:
+    source_scenario_id: nrh_04401_rb120_k0p25_p0_N0p55_pow0
+    scenario_family: pure_kronos
+    rebalance_minutes: 120
+    kronos_weight: 0.25
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_04895:
+    source_scenario_id: nrh_04895_rb120_k1_p0_N0p65_pow3
+    scenario_family: pure_kronos
+    rebalance_minutes: 120
+    kronos_weight: 1.0
+    llm_weight: 0.0
+    threshold: 0.65
+    rank_power: 3.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_04641:
+    source_scenario_id: nrh_04641_rb120_k0p5_p0_N0p55_pow0
+    scenario_family: pure_kronos
+    rebalance_minutes: 120
+    kronos_weight: 0.5
+    llm_weight: 0.0
+    threshold: 0.55
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_05605:
+    source_scenario_id: nrh_05605_rb300_k0_p0p25_N0p55_pow3
+    scenario_family: pure_llm
+    rebalance_minutes: 300
+    kronos_weight: 0.0
+    llm_weight: 0.25
+    threshold: 0.55
+    rank_power: 3.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00106:
+    source_scenario_id: nrh_00106_rb30_k0_p1_N0p8_pow0
+    scenario_family: pure_llm
+    rebalance_minutes: 30
+    kronos_weight: 0.0
+    llm_weight: 1.0
+    threshold: 0.8
+    rank_power: 0.0
+    max_gross: 1.0
+    allow_short: true
+  selector_nrh_00204:
+    source_scenario_id: nrh_00204_rb30_k0p25_p0_N0p55_pow2
+    scenario_family: pure_kronos
+    rebalance_minutes: 30
+    kronos_weight: 0.25
+    llm_weight: 0.0
+    threshold: 0.55
     rank_power: 2.0
     max_gross: 1.0
     allow_short: true

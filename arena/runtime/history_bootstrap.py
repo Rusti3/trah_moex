@@ -50,12 +50,14 @@ class HistoryBootstrapService:
         market_history: MarketHistoryCache,
         news_buffer: NewsBuffer,
         tickers: tuple[str, ...] = TOP20_TICKERS,
+        base_selectors: tuple[str, ...] = BASE_SELECTORS,
         base_selector_params: Mapping[str, Mapping[str, Any]] | None = None,
     ):
         self.state = state
         self.market_history = market_history
         self.news_buffer = news_buffer
         self.tickers = tickers
+        self.base_selectors = tuple(base_selectors)
         self.base_selector_params = {k: dict(v) for k, v in (base_selector_params or {}).items()}
         self._thread: threading.Thread | None = None
 
@@ -67,7 +69,7 @@ class HistoryBootstrapService:
         time_budget_seconds: float = 180.0,
         refresh_market_history: bool = True,
     ) -> HistoryBootstrapResult:
-        existing = self.state.count_lightgbm_training_rows()
+        existing = self.state.count_lightgbm_training_rows(required_selectors=self.base_selectors)
         if existing >= initial_intervals:
             return HistoryBootstrapResult(
                 mode="already_ready",
@@ -105,7 +107,7 @@ class HistoryBootstrapService:
 
     def _background_run(self, *, as_of: datetime, target_intervals: int, time_budget_seconds: float) -> None:
         try:
-            existing = self.state.count_lightgbm_training_rows()
+            existing = self.state.count_lightgbm_training_rows(required_selectors=self.base_selectors)
             if existing < target_intervals:
                 self._bootstrap(
                     as_of=as_of,
@@ -139,7 +141,7 @@ class HistoryBootstrapService:
                     time_budget_seconds=time_budget_seconds,
                 )
                 if time.monotonic() - started > time_budget_seconds:
-                    rows_after = self.state.count_lightgbm_training_rows()
+                    rows_after = self.state.count_lightgbm_training_rows(required_selectors=self.base_selectors)
                     return HistoryBootstrapResult(
                         mode="market_refresh_timeout",
                         requested_intervals=requested_intervals,
@@ -150,7 +152,7 @@ class HistoryBootstrapService:
                         elapsed_ms=_elapsed_ms(started),
                     )
             inserted = self._fill_selector_rows(as_of=as_of, requested_intervals=requested_intervals)
-            rows_after = self.state.count_lightgbm_training_rows()
+            rows_after = self.state.count_lightgbm_training_rows(required_selectors=self.base_selectors)
             return HistoryBootstrapResult(
                 mode="market_proxy_bootstrap",
                 requested_intervals=requested_intervals,
@@ -161,7 +163,7 @@ class HistoryBootstrapService:
                 elapsed_ms=_elapsed_ms(started),
             )
         except Exception as exc:
-            rows_after = self.state.count_lightgbm_training_rows()
+            rows_after = self.state.count_lightgbm_training_rows(required_selectors=self.base_selectors)
             return HistoryBootstrapResult(
                 mode="fallback_live_only",
                 requested_intervals=requested_intervals,
@@ -273,7 +275,7 @@ class HistoryBootstrapService:
                 news_context=news_context,
                 tickers=self.tickers,
             )
-            base_decisions = self._build_base_decisions(kronos_scores, cost_depth)
+            base_decisions = self._build_base_decisions(ts, kronos_scores, cost_depth, latest_base_decisions)
             returns = {}
             for selector_name, decision in base_decisions.items():
                 total = 0.0
@@ -295,11 +297,21 @@ class HistoryBootstrapService:
             self.state.set_json("paper_last_as_of", {"as_of": latest_as_of})
         return inserted
 
-    def _build_base_decisions(self, kronos_scores: Mapping[str, float], cost_depth: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    def _build_base_decisions(
+        self,
+        as_of: datetime,
+        kronos_scores: Mapping[str, float],
+        cost_depth: Mapping[str, Mapping[str, Any]],
+        previous: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         neutral_llm = {ticker: 0.5 for ticker in self.tickers}
-        for selector_name in BASE_SELECTORS:
+        previous = previous or {}
+        for selector_name in self.base_selectors:
             params = dict(self.base_selector_params.get(selector_name, {}))
+            if not _selector_due(as_of, int(float(params.get("rebalance_minutes", 30)))) and selector_name in previous:
+                out[selector_name] = {**params, "target_weights": dict(previous[selector_name].get("target_weights") or {})}
+                continue
             positions = build_target_weights(
                 kronos_scores,
                 neutral_llm,
@@ -338,3 +350,13 @@ def _safe_float(value: Any) -> float:
 
 def _elapsed_ms(started: float) -> int:
     return int(round((time.monotonic() - started) * 1000))
+
+
+def _selector_due(as_of: datetime, rebalance_minutes: int) -> bool:
+    if rebalance_minutes <= 30:
+        return True
+    anchor_minutes = 12 * 60
+    current_minutes = as_of.hour * 60 + as_of.minute
+    if current_minutes < anchor_minutes:
+        return False
+    return (current_minutes - anchor_minutes) % rebalance_minutes == 0

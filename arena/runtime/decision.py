@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from .portfolio import build_target_weights, normalize_gross, positions_from_weights
-from .schemas import BASE_SELECTORS, BaseSelectorDecision, DecisionResult
+from .schemas import BaseSelectorDecision, DecisionResult
 from .selector import RollingRankWeightedSelector
 
 
@@ -16,7 +16,10 @@ def _history_rows(history: Mapping[str, Any] | list[Mapping[str, Any]]) -> list[
     return list(rows or [])
 
 
-def _base_decisions(history: Mapping[str, Any] | list[Mapping[str, Any]]) -> dict[str, BaseSelectorDecision]:
+def _base_decisions(
+    history: Mapping[str, Any] | list[Mapping[str, Any]],
+    required_selectors: tuple[str, ...],
+) -> dict[str, BaseSelectorDecision]:
     if not isinstance(history, Mapping):
         raise ValueError("history must contain base_selector_decisions for live target construction")
     raw = history.get("base_selector_decisions")
@@ -39,7 +42,7 @@ def _base_decisions(history: Mapping[str, Any] | list[Mapping[str, Any]]) -> dic
             allow_short=bool(value.get("allow_short", True)),
             target_weights=value.get("target_weights"),
         )
-    missing = [name for name in BASE_SELECTORS if name not in out]
+    missing = [name for name in required_selectors if name not in out]
     if missing:
         raise ValueError(f"missing base selector decisions: {missing}")
     return out
@@ -67,7 +70,7 @@ def make_decision(
 
     selector = selector or RollingRankWeightedSelector()
     rows = _history_rows(history)
-    base_decisions = _base_decisions(history)
+    base_decisions = _base_decisions(history, tuple(selector.base_selectors))
     selector_weights = (
         {name: float(weight) for name, weight in selector_weights_override.items()}
         if selector_weights_override is not None
