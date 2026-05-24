@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ARENA_CONFIG=arena/config/production.yaml \
     DATABASE_PATH=/data/news.sqlite3 \
     ARENA_STATE_DB=/data/arena_state.sqlite3 \
+    ARENA_MARKET_HISTORY_DB=/data/market_history.sqlite3 \
     ARENA_LLM_CACHE=/data/llm_cache.jsonl \
     ARENA_LOGS_DIR=/data/logs \
     XDG_CACHE_HOME=/data/cache \

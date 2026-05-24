@@ -5,13 +5,19 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
+
 from arena.runtime.feature_builder import build_live_features
+from arena.runtime.history_bootstrap import HistoryBootstrapService
 from arena.runtime.lightgbm_selector import rank_weights_from_scores
 from arena.runtime import RollingRankWeightedSelector, build_target_weights, make_decision
 from arena.runtime.llm_scorer import LLMNewsScorer, _hash_payload
+from arena.runtime.market_history import MarketHistoryCache
+from arena.runtime.news_service import NewsBuffer, ensure_live_news_schema
 from arena.runtime.order_manager import OrderManager
 from arena.runtime.schemas import DecisionResult, TargetPosition
 from arena.runtime.settings import load_settings
+from arena.runtime.state_store import StateStore
 
 
 class RuntimeTests(unittest.TestCase):
@@ -142,7 +148,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertGreater(features["kronos_spread"], 0.0)
 
     def test_llm_prompt_schema_is_per_ticker(self):
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             scorer = LLMNewsScorer(cache_path=f"{tmp}/llm_cache.jsonl", api_key_env="NO_SUCH_ENV")
             payload = scorer._prompt_payload(
                 {
@@ -289,6 +295,77 @@ class RuntimeTests(unittest.TestCase):
         )
         equity = manager.estimate_equity({"ALRS": 100, "SBER": -10}, {"ALRS": 25.0, "SBER": 300.0})
         self.assertEqual(equity, 78000.0)
+
+    def test_market_history_append_deduplicates_ticker_timestamp(self):
+        with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            cache = MarketHistoryCache(f"{tmp}/market_history.sqlite3")
+            candles = pd.DataFrame(
+                [
+                    {
+                        "timestamps": "2026-05-21 12:00:00",
+                        "end": "2026-05-21 12:29:59",
+                        "open": 100,
+                        "high": 101,
+                        "low": 99,
+                        "close": 100,
+                        "volume": 10,
+                        "amount": 1000,
+                    }
+                ]
+            )
+            cache.append_candles("SBER", 30, candles)
+            cache.append_candles("SBER", 30, candles.assign(close=101))
+            loaded = cache.load_candles("SBER", interval_minutes=30, before="2026-05-21 13:00:00", limit=10)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(float(loaded["close"].iloc[0]), 101.0)
+
+    def test_history_bootstrap_fills_training_rows_from_past_only(self):
+        with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            state = StateStore(f"{tmp}/state.sqlite3")
+            news_db = f"{tmp}/news.sqlite3"
+            ensure_live_news_schema(news_db)
+            cache = MarketHistoryCache(f"{tmp}/market_history.sqlite3")
+            rows = []
+            for idx in range(6):
+                ts = pd.Timestamp("2026-05-21 10:00:00") + pd.Timedelta(minutes=30 * idx)
+                for ticker, offset in {"SBER": 1.0, "LKOH": 2.0, "GAZP": 3.0}.items():
+                    base = 100 + idx + offset
+                    rows.append(
+                        {
+                            "ticker": ticker,
+                            "timestamps": ts,
+                            "end": ts + pd.Timedelta(minutes=30) - pd.Timedelta(seconds=1),
+                            "open": base,
+                            "high": base + 1,
+                            "low": base - 1,
+                            "close": base,
+                            "volume": 100,
+                            "amount": 10000,
+                        }
+                    )
+            df = pd.DataFrame(rows)
+            for ticker in ("SBER", "LKOH", "GAZP"):
+                cache.append_candles(ticker, 30, df[df["ticker"] == ticker])
+            service = HistoryBootstrapService(
+                state=state,
+                market_history=cache,
+                news_buffer=NewsBuffer(news_db),
+                tickers=("SBER", "LKOH", "GAZP"),
+                base_selector_params={
+                    "selector_family_first": {"threshold": 0.55, "rank_power": 1},
+                    "selector_news_aware": {"threshold": 0.55, "rank_power": 1},
+                    "selector_marketwide_news": {"threshold": 0.55, "rank_power": 1},
+                },
+            )
+            result = service.bootstrap_initial(
+                as_of=datetime(2026, 5, 21, 13, 0, 0),
+                initial_intervals=4,
+                refresh_market_history=False,
+            )
+            rows = state.load_lightgbm_training_rows(limit=10)
+        self.assertGreaterEqual(result.rows_after, 4)
+        self.assertGreaterEqual(len(rows), 4)
+        self.assertTrue(all(row["timestamp"] < "2026-05-21 13:00:00" for row in rows))
 
 
 if __name__ == "__main__":

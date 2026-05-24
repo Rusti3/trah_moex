@@ -28,6 +28,12 @@ class RuntimeSettings:
     lot_sizes: dict[str, int]
     decision_interval_minutes: int
     decision_delay_seconds: int
+    precompute_seconds: int
+    candle_close_wait_seconds: int
+    execution_deadline_seconds: int
+    history_bootstrap_initial_intervals: int
+    history_bootstrap_background_intervals: int
+    history_bootstrap_time_budget_seconds: int
     max_kronos_wait_seconds: int
     max_llm_wait_seconds: int
     max_moex_wait_seconds: int
@@ -35,6 +41,7 @@ class RuntimeSettings:
     max_daily_trades: int
     min_order_value_rub: float
     state_db_path: Path
+    market_history_db_path: Path
     news_db_path: Path
     llm_cache_path: Path
     logs_dir: Path
@@ -88,6 +95,12 @@ def load_settings(config_path: str | Path | None = None) -> RuntimeSettings:
         lot_sizes=lot_sizes,
         decision_interval_minutes=int(os.environ.get("ARENA_DECISION_INTERVAL_MINUTES", rebalance.get("decision_interval_minutes", 30))),
         decision_delay_seconds=int(os.environ.get("ARENA_DECISION_DELAY_SECONDS", rebalance.get("decision_delay_seconds", 90))),
+        precompute_seconds=int(os.environ.get("ARENA_PRECOMPUTE_SECONDS", rebalance.get("precompute_seconds", 120))),
+        candle_close_wait_seconds=int(os.environ.get("ARENA_CANDLE_CLOSE_WAIT_SECONDS", rebalance.get("candle_close_wait_seconds", rebalance.get("decision_delay_seconds", 90)))),
+        execution_deadline_seconds=int(os.environ.get("ARENA_EXECUTION_DEADLINE_SECONDS", rebalance.get("execution_deadline_seconds", 90))),
+        history_bootstrap_initial_intervals=int(os.environ.get("ARENA_HISTORY_BOOTSTRAP_INITIAL_INTERVALS", cfg.get("history_bootstrap", {}).get("initial_intervals", 48))),
+        history_bootstrap_background_intervals=int(os.environ.get("ARENA_HISTORY_BOOTSTRAP_BACKGROUND_INTERVALS", cfg.get("history_bootstrap", {}).get("background_intervals", 512))),
+        history_bootstrap_time_budget_seconds=int(os.environ.get("ARENA_HISTORY_BOOTSTRAP_TIME_BUDGET_SECONDS", cfg.get("history_bootstrap", {}).get("time_budget_seconds", 180))),
         max_kronos_wait_seconds=int(os.environ.get("ARENA_MAX_KRONOS_WAIT_SECONDS", 300)),
         max_llm_wait_seconds=int(os.environ.get("ARENA_MAX_LLM_WAIT_SECONDS", 60)),
         max_moex_wait_seconds=int(os.environ.get("ARENA_MAX_MOEX_WAIT_SECONDS", 30)),
@@ -95,6 +108,7 @@ def load_settings(config_path: str | Path | None = None) -> RuntimeSettings:
         max_daily_trades=int(os.environ.get("ARENA_MAX_DAILY_TRADES", 950)),
         min_order_value_rub=float(os.environ.get("ARENA_MIN_ORDER_VALUE_RUB", 100.0)),
         state_db_path=Path(os.environ.get("ARENA_STATE_DB", str(data_dir / "arena_state.sqlite3"))),
+        market_history_db_path=Path(os.environ.get("ARENA_MARKET_HISTORY_DB", str(data_dir / "market_history.sqlite3"))),
         news_db_path=Path(os.environ.get("DATABASE_PATH", str(data_dir / "news.sqlite3"))),
         llm_cache_path=Path(os.environ.get("ARENA_LLM_CACHE", str(data_dir / "llm_cache.jsonl"))),
         logs_dir=Path(os.environ.get("ARENA_LOGS_DIR", str(data_dir / "logs"))),

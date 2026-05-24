@@ -174,6 +174,23 @@ class StateStore:
                 ),
             )
 
+    def count_selector_returns(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS c FROM selector_returns").fetchone()
+        return int(row["c"] if row else 0)
+
+    def count_lightgbm_training_rows(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM market_features mf
+                JOIN selector_returns sr
+                  ON sr.timestamp_msk = mf.timestamp_msk
+                """
+            ).fetchone()
+        return int(row["c"] if row else 0)
+
     def save_market_features(self, timestamp: str, features: Mapping[str, float]) -> None:
         with self.connect() as conn:
             conn.execute(

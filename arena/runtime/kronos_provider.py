@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .market_history import MarketHistoryCache
 from .schemas import TOP20_TICKERS
 
 
@@ -24,6 +25,7 @@ class KronosTop20Provider:
         sample_count: int = 10,
         temperature: float = 0.6,
         top_p: float = 0.90,
+        market_history: MarketHistoryCache | None = None,
     ):
         self.weights_dir = Path(weights_dir)
         self.weights_mode = weights_mode
@@ -33,6 +35,7 @@ class KronosTop20Provider:
         self.sample_count = sample_count
         self.temperature = temperature
         self.top_p = top_p
+        self.market_history = market_history
         self._predictor = None
         self.last_good_scores: dict[str, float] = {}
 
@@ -50,6 +53,23 @@ class KronosTop20Provider:
 
     def warm(self) -> None:
         self._ensure_predictor()
+
+    def prefetch_history(
+        self,
+        as_of: datetime,
+        tickers: tuple[str, ...] = TOP20_TICKERS,
+        *,
+        time_budget_seconds: float | None = None,
+    ) -> dict[str, int]:
+        if self.market_history is None:
+            return {}
+        return self.market_history.refresh(
+            tickers,
+            as_of=as_of,
+            days=self.context_days + 5,
+            intervals=(60,),
+            time_budget_seconds=time_budget_seconds,
+        )
 
     def _ensure_predictor(self):
         if self._predictor is not None:
@@ -74,14 +94,26 @@ class KronosTop20Provider:
         pred_returns: dict[str, float] = {}
         for ticker in tickers:
             try:
-                df = fetch_moex_candles(
-                    ticker,
-                    from_date=from_date,
-                    till_date=till_date,
-                    interval=60,
-                    source_interval=60,
-                    drop_incomplete_last_candle=True,
-                )
+                df = pd.DataFrame()
+                if self.market_history is not None:
+                    self.market_history.ensure_history(
+                        ticker,
+                        as_of=as_of,
+                        days=self.context_days + 5,
+                        interval_minutes=60,
+                        source_interval=60,
+                        drop_incomplete_last_candle=True,
+                    )
+                    df = self.market_history.load_candles(ticker, interval_minutes=60, before=as_of, limit=512)
+                if df.empty:
+                    df = fetch_moex_candles(
+                        ticker,
+                        from_date=from_date,
+                        till_date=till_date,
+                        interval=60,
+                        source_interval=60,
+                        drop_incomplete_last_candle=True,
+                    )
                 df = df[df["timestamps"] < pd.Timestamp(as_of).floor("h")].tail(512).copy()
                 if len(df) < 30:
                     continue

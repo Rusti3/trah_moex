@@ -15,6 +15,11 @@ live_selector:
   lightgbm_estimators: 60
   fallback: rolling_rank_weighted_w24_p2
 
+history_bootstrap:
+  initial_intervals: 48
+  background_intervals: 512
+  time_budget_seconds: 180
+
 universe:
   tickers:
     - LKOH
@@ -40,7 +45,10 @@ universe:
 
 rebalance:
   decision_interval_minutes: 30
-  decision_delay_seconds: 90
+  decision_delay_seconds: 5
+  precompute_seconds: 120
+  candle_close_wait_seconds: 5
+  execution_deadline_seconds: 90
   expected_latency_minutes: 1.0
   max_kronos_wait_seconds: 300
   target_time_flow:

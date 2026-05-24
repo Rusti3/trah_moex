@@ -7,17 +7,20 @@ import json
 import os
 import sys
 import time
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from .arena_go_client import ArenaGoClient
 from .decision import make_decision
 from .feature_builder import build_live_features
+from .history_bootstrap import HistoryBootstrapService
 from .jsonl_logger import JsonlLogger
 from .kronos_provider import KronosTop20Provider
 from .lightgbm_selector import LiveLightGBMSelector
 from .llm_scorer import LLMNewsScorer
+from .market_history import MarketHistoryCache
 from .market_data_provider import MoexRealtimeProvider
 from .market_hours import is_market_open, next_decision_time, now_msk, sleep_seconds_until
 from .news_service import LLMNewsTagger, NewsBuffer, NewsIngestionService
@@ -34,6 +37,20 @@ DEFAULT_BASE_SELECTOR_PARAMS = {
     "selector_news_aware": {"kronos_weight": 1.0, "llm_weight": 2.0, "threshold": 0.65, "rank_power": 2.0},
     "selector_marketwide_news": {"kronos_weight": 0.5, "llm_weight": 1.0, "threshold": 0.65, "rank_power": 2.0},
 }
+
+
+@dataclass
+class PrecomputeSnapshot:
+    as_of: str
+    started_at: float
+    positions: dict[str, int] | None = None
+    bot_snapshot: Any | None = None
+    news_context: dict[str, Any] | None = None
+    news_context_key: str = ""
+    llm_raw: dict[str, dict[str, Any]] | None = None
+    cost_depth: dict[str, dict[str, Any]] | None = None
+    market_history_rows_added: int = 0
+    errors: dict[str, str] | None = None
 
 
 def load_env_file(path: str | Path = ".env") -> None:
@@ -55,6 +72,7 @@ class ArenaLiveBot:
         self.settings.logs_dir.mkdir(parents=True, exist_ok=True)
         self.logger = JsonlLogger(settings.logs_dir)
         self.state = StateStore(settings.state_db_path)
+        self.market_history = MarketHistoryCache(settings.market_history_db_path)
         self.client = ArenaGoClient(
             settings.arena_api_key,
             base_url=settings.arena_base_url,
@@ -64,6 +82,7 @@ class ArenaLiveBot:
             weights_dir=settings.weights_dir,
             weights_mode=settings.weights_mode,
             device=settings.device,
+            market_history=self.market_history,
         )
         self.llm = LLMNewsScorer(
             cache_path=settings.llm_cache_path,
@@ -108,11 +127,28 @@ class ArenaLiveBot:
             **DEFAULT_BASE_SELECTOR_PARAMS,
             **(cfg.get("base_selector_params") or {}),
         }
+        self.history_bootstrap = HistoryBootstrapService(
+            state=self.state,
+            market_history=self.market_history,
+            news_buffer=self.news_buffer,
+            tickers=settings.tickers,
+            base_selector_params=self.base_selector_params,
+        )
 
     def initialize(self) -> None:
         self.logger.write("startup", {"live_orders": self.settings.live_orders, "bot": self.settings.bot_name})
         self.news_ingestion.initialize()
         self.news_ingestion.start_background()
+        bootstrap_result = self.history_bootstrap.bootstrap_initial(
+            as_of=now_msk(),
+            initial_intervals=self.settings.history_bootstrap_initial_intervals,
+            time_budget_seconds=self.settings.history_bootstrap_time_budget_seconds,
+        )
+        self.logger.write("history_bootstrap_ready", bootstrap_result.to_log())
+        self.history_bootstrap.start_background(
+            as_of=now_msk(),
+            target_intervals=self.settings.history_bootstrap_background_intervals,
+        )
         try:
             print("[arena-live] kronos warmup start", flush=True)
             self.logger.write("kronos_warm_start", {"weights_dir": str(self.settings.weights_dir), "device": self.settings.device})
@@ -135,32 +171,122 @@ class ArenaLiveBot:
             target = next_decision_time(
                 current,
                 interval_minutes=self.settings.decision_interval_minutes,
-                decision_delay_seconds=self.settings.decision_delay_seconds,
+                decision_delay_seconds=self.settings.candle_close_wait_seconds,
             )
-            sleep_seconds = sleep_seconds_until(target)
+            precompute_at = target - timedelta(seconds=self.settings.precompute_seconds)
+            sleep_seconds = sleep_seconds_until(precompute_at, current)
             self.logger.write(
                 "loop_wait",
                 {
                     "now": current.strftime("%Y-%m-%d %H:%M:%S"),
+                    "precompute_at": precompute_at.strftime("%Y-%m-%d %H:%M:%S"),
                     "next_decision": target.strftime("%Y-%m-%d %H:%M:%S"),
                     "sleep_seconds": round(sleep_seconds, 3),
                 },
             )
             await asyncio.sleep(sleep_seconds)
+            precompute = None
+            try:
+                precompute = await self.precompute_once(target)
+            except Exception as exc:
+                self.logger.write("precompute_error", {"as_of": target.strftime("%Y-%m-%d %H:%M:%S"), "error": repr(exc)})
+            await asyncio.sleep(sleep_seconds_until(target))
             try:
                 self.logger.write("run_once_begin", {"as_of": target.strftime("%Y-%m-%d %H:%M:%S")})
-                await self.run_once(target)
+                await self.run_once(target, precompute=precompute)
             except Exception as exc:
                 self.logger.write("run_once_error", {"error": repr(exc)})
                 await asyncio.sleep(5)
 
-    async def run_once(self, as_of: datetime | None = None) -> dict[str, Any]:
+    async def precompute_once(self, as_of: datetime) -> PrecomputeSnapshot:
+        as_of_s = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        started = time.monotonic()
+        self.logger.write("precompute_start", {"as_of": as_of_s})
+        snapshot = PrecomputeSnapshot(as_of=as_of_s, started_at=started, errors={})
+        positions_task = asyncio.create_task(asyncio.to_thread(self.order_manager.reconcile_positions))
+        bot_task = asyncio.create_task(asyncio.to_thread(self.order_manager.bot_snapshot))
+        history_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.kronos.prefetch_history,
+                as_of,
+                self.settings.tickers,
+                time_budget_seconds=max(1.0, min(60.0, float(self.settings.precompute_seconds))),
+            )
+        )
+        cost_task = asyncio.create_task(self.market.current_cost_depth(as_of, self.settings.tickers))
+        try:
+            tag_result = await asyncio.to_thread(self.news_tagger.tag_new_news, as_of, self.settings.tickers)
+            snapshot.news_context = self.news_buffer.get_context(as_of, self.settings.tickers)
+            snapshot.news_context_key = _context_key(snapshot.news_context)
+            self.logger.write("precompute_news_ready", {"as_of": as_of_s, "news_tagging": tag_result})
+            try:
+                snapshot.llm_raw = await asyncio.wait_for(
+                    self.llm.score_context(snapshot.news_context, self.settings.tickers),
+                    timeout=self.settings.max_llm_wait_seconds,
+                )
+            except Exception as exc:
+                snapshot.errors["llm"] = str(exc)
+        except Exception as exc:
+            snapshot.errors["news"] = str(exc)
+        for name, task in {
+            "positions": positions_task,
+            "bot": bot_task,
+            "history": history_task,
+            "cost_depth": cost_task,
+        }.items():
+            try:
+                result = await asyncio.wait_for(task, timeout=max(1, min(30, self.settings.precompute_seconds)))
+                if name == "positions":
+                    snapshot.positions = result
+                elif name == "bot":
+                    snapshot.bot_snapshot = result
+                elif name == "history":
+                    snapshot.market_history_rows_added = sum(int(v) for v in (result or {}).values())
+                elif name == "cost_depth":
+                    snapshot.cost_depth = result
+            except Exception as exc:
+                snapshot.errors[name] = str(exc)
+        self.logger.write(
+            "precompute_ready",
+            {
+                "as_of": as_of_s,
+                "elapsed_ms": _elapsed_ms(started),
+                "positions_count": len(snapshot.positions or {}),
+                "has_bot_snapshot": snapshot.bot_snapshot is not None,
+                "has_llm": snapshot.llm_raw is not None,
+                "has_cost_depth": snapshot.cost_depth is not None,
+                "market_history_rows_added": snapshot.market_history_rows_added,
+                "errors": snapshot.errors or {},
+            },
+        )
+        return snapshot
+
+    async def run_once(self, as_of: datetime | None = None, *, precompute: PrecomputeSnapshot | None = None) -> dict[str, Any]:
         as_of = as_of or now_msk()
         as_of_s = as_of.strftime("%Y-%m-%d %H:%M:%S")
+        run_started = time.monotonic()
         self.logger.write("run_once_start", {"as_of": as_of_s, "live_orders": self.settings.live_orders})
         if not is_market_open(as_of):
             self.logger.write("market_closed_skip", {"as_of": as_of_s})
             return {"status": "market_closed"}
+
+        candle_started = time.monotonic()
+        try:
+            candle_rows = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.market_history.refresh,
+                    self.settings.tickers,
+                    as_of=as_of,
+                    days=2,
+                    intervals=(30, 60),
+                    time_budget_seconds=min(20.0, max(1.0, float(self.settings.execution_deadline_seconds) / 3.0)),
+                ),
+                timeout=min(20, max(1, self.settings.execution_deadline_seconds // 3)),
+            )
+            candle_rows_added = sum(int(v) for v in candle_rows.values())
+            self.logger.write("candle_append_ready", {"as_of": as_of_s, "rows_added": candle_rows_added, "elapsed_ms": _elapsed_ms(candle_started)})
+        except Exception as exc:
+            self.logger.write("candle_append_error", {"as_of": as_of_s, "error": str(exc), "elapsed_ms": _elapsed_ms(candle_started)})
 
         tag_result = await asyncio.to_thread(self.news_tagger.tag_new_news, as_of, self.settings.tickers)
         news_context = self.news_buffer.get_context(as_of, self.settings.tickers)
@@ -177,7 +303,12 @@ class ArenaLiveBot:
         )
 
         kronos_task = asyncio.create_task(self.kronos.forecast_bullish_scores(as_of, self.settings.tickers))
-        llm_task = asyncio.create_task(self.llm.score_context(news_context, self.settings.tickers))
+        if precompute is not None and precompute.news_context_key == _context_key(news_context) and precompute.llm_raw is not None:
+            llm_task = _completed_task(precompute.llm_raw)
+            llm_source = "precompute_cache"
+        else:
+            llm_task = asyncio.create_task(self.llm.score_context(news_context, self.settings.tickers))
+            llm_source = "final_call"
         moex_task = asyncio.create_task(self.market.current_cost_depth(as_of, self.settings.tickers))
         self.logger.write(
             "parallel_tasks_started",
@@ -186,12 +317,20 @@ class ArenaLiveBot:
                 "max_kronos_wait_seconds": self.settings.max_kronos_wait_seconds,
                 "max_llm_wait_seconds": self.settings.max_llm_wait_seconds,
                 "max_moex_wait_seconds": self.settings.max_moex_wait_seconds,
+                "execution_deadline_seconds": self.settings.execution_deadline_seconds,
+                "llm_source": llm_source,
             },
         )
 
         kronos_stale = False
         try:
-            kronos_scores = await asyncio.wait_for(kronos_task, timeout=self.settings.max_kronos_wait_seconds)
+            kronos_scores = await _wait_component(
+                kronos_task,
+                name="kronos",
+                run_started=run_started,
+                deadline_seconds=self.settings.execution_deadline_seconds,
+                component_timeout=self.settings.max_kronos_wait_seconds,
+            )
         except Exception as exc:
             kronos_task.cancel()
             kronos_scores = self.state.get_json("last_good_kronos_scores", {})
@@ -201,10 +340,16 @@ class ArenaLiveBot:
             self.logger.write("kronos_fallback", {"as_of": as_of_s, "error": str(exc)})
         else:
             self.state.set_json("last_good_kronos_scores", dict(kronos_scores))
-            self.logger.write("kronos_scores_ready", _score_summary(as_of_s, kronos_scores))
+            self.logger.write("kronos_scores_ready", {**_score_summary(as_of_s, kronos_scores), "kronos_ready_ms": _elapsed_ms(run_started)})
 
         try:
-            llm_raw = await asyncio.wait_for(llm_task, timeout=self.settings.max_llm_wait_seconds)
+            llm_raw = await _wait_component(
+                llm_task,
+                name="llm",
+                run_started=run_started,
+                deadline_seconds=self.settings.execution_deadline_seconds,
+                component_timeout=self.settings.max_llm_wait_seconds,
+            )
         except Exception as exc:
             llm_task.cancel()
             llm_raw = {
@@ -213,13 +358,23 @@ class ArenaLiveBot:
             }
             self.logger.write("llm_fallback", {"as_of": as_of_s, "error": str(exc)})
         llm_scores = {ticker: float(row.get("bullish_score", 0.5)) for ticker, row in llm_raw.items()}
-        self.logger.write("llm_scores_ready", _score_summary(as_of_s, llm_scores))
+        self.logger.write("llm_scores_ready", {**_score_summary(as_of_s, llm_scores), "llm_ready_ms": _elapsed_ms(run_started), "llm_source": llm_source})
 
         try:
-            cost_depth = await asyncio.wait_for(moex_task, timeout=self.settings.max_moex_wait_seconds)
+            cost_depth = await _wait_component(
+                moex_task,
+                name="moex",
+                run_started=run_started,
+                deadline_seconds=self.settings.execution_deadline_seconds,
+                component_timeout=self.settings.max_moex_wait_seconds,
+            )
         except Exception as exc:
             moex_task.cancel()
-            cost_depth = self.market.last_good_cost_depth or {ticker: {"tradable": True, "last_price": 0.0} for ticker in self.settings.tickers}
+            cost_depth = (
+                (precompute.cost_depth if precompute is not None else None)
+                or self.market.last_good_cost_depth
+                or {ticker: {"tradable": True, "last_price": 0.0} for ticker in self.settings.tickers}
+            )
             self.logger.write("moex_fallback", {"as_of": as_of_s, "error": str(exc)})
         else:
             self.logger.write(
@@ -229,6 +384,7 @@ class ArenaLiveBot:
                     "rows": len(cost_depth),
                     "tradable": sum(1 for row in cost_depth.values() if row.get("tradable", True)),
                     "priced": sum(1 for row in cost_depth.values() if float(row.get("last_price", 0.0) or 0.0) > 0),
+                    "moex_ready_ms": _elapsed_ms(run_started),
                 },
             )
 
@@ -292,8 +448,8 @@ class ArenaLiveBot:
             max_gross=self.settings.max_gross_exposure,
         )
         decision_id = _decision_id(as_of_s, decision.selector_weights)
-        positions = self.order_manager.reconcile_positions()
-        bot_snapshot = self.order_manager.bot_snapshot()
+        positions = precompute.positions if precompute is not None and precompute.positions is not None else self.order_manager.reconcile_positions()
+        bot_snapshot = precompute.bot_snapshot if precompute is not None and precompute.bot_snapshot is not None else self.order_manager.bot_snapshot()
         cash_balance = bot_snapshot.cash_balance
         equity = self.order_manager.estimate_equity(positions, prices, cash_balance=cash_balance)
         planned = self.order_manager.plan_orders(
@@ -336,15 +492,19 @@ class ArenaLiveBot:
                 ],
             },
         )
+        self.logger.write("orders_submit_start", {"as_of": as_of_s, "orders": len(planned), "elapsed_ms": _elapsed_ms(run_started)})
         order_results = self.order_manager.execute_orders(decision_id, as_of_s, planned)
+        order_log_payload = {
+            "as_of": as_of_s,
+            "results_count": len(order_results),
+            "statuses": _status_counts(order_results),
+            "elapsed_ms": _elapsed_ms(run_started),
+        }
         self.logger.write(
-            "orders_executed",
-            {
-                "as_of": as_of_s,
-                "results_count": len(order_results),
-                "statuses": _status_counts(order_results),
-            },
+            "orders_submit_done",
+            order_log_payload,
         )
+        self.logger.write("orders_executed", order_log_payload)
 
         self._save_paper_positions(base_decisions, prices, as_of_s)
         payload = {
@@ -365,6 +525,7 @@ class ArenaLiveBot:
             "orders": order_results,
             "news_rows": news_rows,
             "news_tagging": tag_result,
+            "latency_ms": _elapsed_ms(run_started),
         }
         self.state.insert_decision(decision_id, as_of_s, payload)
         self.logger.write("decision", payload)
@@ -458,6 +619,37 @@ def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return out
 
 
+def _completed_task(value: Any) -> asyncio.Task:
+    async def _done():
+        return value
+
+    return asyncio.create_task(_done())
+
+
+async def _wait_component(
+    task: asyncio.Task,
+    *,
+    name: str,
+    run_started: float,
+    deadline_seconds: int,
+    component_timeout: int,
+) -> Any:
+    remaining = max(float(deadline_seconds) - (time.monotonic() - run_started), 0.0)
+    timeout = min(float(component_timeout), remaining)
+    if timeout <= 0:
+        raise TimeoutError(f"{name} deadline exceeded")
+    return await asyncio.wait_for(task, timeout=timeout)
+
+
+def _context_key(context: dict[str, Any] | None) -> str:
+    raw = json.dumps(context or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _elapsed_ms(started: float) -> int:
+    return int(round((time.monotonic() - started) * 1000))
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ArenaGo live trading bot for rolling_rank_weighted_w24_p2.")
     p.add_argument("--config", default=os.environ.get("ARENA_CONFIG", "arena/config/production.yaml"))
@@ -475,7 +667,8 @@ def main() -> None:
         bot.initialize()
         try:
             as_of = datetime.fromisoformat(args.as_of) if args.as_of else now_msk()
-            print(json.dumps(asyncio.run(bot.run_once(as_of)), ensure_ascii=False, indent=2, default=str))
+            precompute = asyncio.run(bot.precompute_once(as_of))
+            print(json.dumps(asyncio.run(bot.run_once(as_of, precompute=precompute)), ensure_ascii=False, indent=2, default=str))
         finally:
             bot.shutdown()
         return
