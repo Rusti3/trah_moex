@@ -15,6 +15,7 @@ from arena.runtime.lightgbm_selector import LiveLightGBMSelector, rank_weights_f
 from arena.runtime import RollingRankWeightedSelector, build_target_weights, make_decision
 from arena.runtime.llm_scorer import LLMNewsScorer, _hash_payload
 from arena.runtime.market_history import MarketHistoryCache
+from arena.runtime.market_data_provider import _snapshot
 from arena.runtime.news_service import NewsBuffer, NewsIngestionLogAggregator, ensure_live_news_schema
 from arena.runtime.order_manager import OrderManager
 from arena.runtime.schemas import DecisionResult, TargetPosition
@@ -172,6 +173,9 @@ class RuntimeTests(unittest.TestCase):
             )
         self.assertIn("SBER", payload["schema"])
         self.assertIn("LKOH", payload["schema"])
+        self.assertEqual(payload["prompt_version"], "news_rubric_v2")
+        self.assertTrue(any("already priced" in rule for rule in payload["rubric"]))
+        self.assertIn("already_priced_risk", payload["schema"]["SBER"])
 
     def test_settings_default_polza_model_is_pro(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -259,6 +263,84 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(planned[0].capped_quantity, 2000)
         self.assertEqual(planned[0].cap_reason, "cash_cap")
         self.assertEqual(planned[0].cash_after_order, 0.0)
+
+    def test_missing_bbo_uses_cost_floor_not_zero(self):
+        row = _snapshot(
+            ticker="SBER",
+            last_price=300.0,
+            bid=0.0,
+            ask=0.0,
+            bid_levels=[],
+            ask_levels=[],
+            source="test",
+            source_quality="missing_bbo",
+        )
+        self.assertTrue(row["missing_bbo"])
+        self.assertTrue(row["unknown_cost"])
+        self.assertTrue(row["liquidity_degraded"])
+        self.assertGreater(row["estimated_cost_pct"], 0.0)
+
+    def test_order_manager_caps_by_visible_depth(self):
+        manager = OrderManager(
+            client=None,
+            state=None,
+            bot_name="test",
+            lot_sizes={"SBER": 1},
+            live_orders=False,
+        )
+        decision = DecisionResult(
+            as_of="2026-05-24 12:31:30",
+            selector_weights={},
+            target_positions=(TargetPosition("SBER", "long", 1.0, 1.0),),
+        )
+        planned = manager.plan_orders(
+            decision,
+            positions={},
+            prices={"SBER": 100.0},
+            equity=10000.0,
+            cash_balance=10000.0,
+            cost_depth={
+                "SBER": {
+                    "source": "moexalgo",
+                    "source_quality": "depth",
+                    "mid_price": 100.0,
+                    "bbo_spread_pct": 0.002,
+                    "estimated_cost_pct": 0.001,
+                    "ask_levels": [{"price": 100.2, "quantity": 30}],
+                    "bid_levels": [{"price": 99.8, "quantity": 30}],
+                }
+            },
+        )
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0].requested_quantity, 100)
+        self.assertEqual(planned[0].quantity, 30)
+        self.assertIn("depth_cap", planned[0].cap_reason)
+        self.assertTrue(planned[0].depth_shortfall)
+        self.assertGreater(planned[0].expected_cost_pct, 0.0)
+
+    def test_order_manager_caps_degraded_risk_increasing_orders(self):
+        manager = OrderManager(
+            client=None,
+            state=None,
+            bot_name="test",
+            lot_sizes={"SBER": 1},
+            live_orders=False,
+        )
+        decision = DecisionResult(
+            as_of="2026-05-24 12:31:30",
+            selector_weights={},
+            target_positions=(TargetPosition("SBER", "long", 1.0, 1.0),),
+        )
+        planned = manager.plan_orders(
+            decision,
+            positions={},
+            prices={"SBER": 100.0},
+            equity=10000.0,
+            cash_balance=10000.0,
+            cost_depth={"SBER": {"source": "iss_marketdata", "source_quality": "bbo_fallback", "liquidity_degraded": True, "estimated_cost_pct": 0.001}},
+        )
+        self.assertEqual(planned[0].quantity, 20)
+        self.assertIn("degraded_liquidity_cap", planned[0].cap_reason)
 
     def test_sells_do_not_fund_buy_budget_in_same_batch(self):
         manager = OrderManager(
@@ -377,6 +459,32 @@ class RuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(result.rows_after, 4)
         self.assertGreaterEqual(len(rows), 4)
         self.assertTrue(all(row["timestamp"] < "2026-05-21 13:00:00" for row in rows))
+
+    def test_decision_metadata_reports_family_conflicts(self):
+        history = {
+            "selector_returns": [],
+            "base_selector_decisions": {
+                "selector_family_first": {"target_weights": {"SBER": 1.0}, "kronos_weight": 1, "llm_weight": 1, "threshold": 0.6, "rank_power": 1},
+                "selector_news_aware": {"target_weights": {"SBER": -1.0}, "kronos_weight": 1, "llm_weight": 1, "threshold": 0.6, "rank_power": 1},
+                "selector_marketwide_news": {"target_weights": {"LKOH": 1.0}, "kronos_weight": 1, "llm_weight": 1, "threshold": 0.6, "rank_power": 1},
+            },
+        }
+        result = make_decision(
+            as_of="2026-05-01 12:00:00",
+            kronos_scores={},
+            llm_scores={},
+            cost_depth={},
+            history=history,
+            selector_weights_override={
+                "selector_family_first": 0.5,
+                "selector_news_aware": 0.25,
+                "selector_marketwide_news": 0.25,
+            },
+        )
+        conflict = result.metadata["family_conflict"]
+        self.assertEqual(conflict["conflict_tickers_count"], 1)
+        self.assertEqual(conflict["conflict_tickers"][0]["ticker"], "SBER")
+        self.assertGreater(conflict["cancelled_weight_abs"], 0.0)
 
     def test_state_store_persists_dynamic_selector_returns(self):
         with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

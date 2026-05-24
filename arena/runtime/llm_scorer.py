@@ -14,6 +14,8 @@ except Exception:  # pragma: no cover
 
 from .schemas import TOP20_TICKERS
 
+PROMPT_VERSION = "news_rubric_v2"
+
 
 def _hash_payload(model: str, payload: dict[str, Any]) -> str:
     raw = json.dumps({"model": model, "payload": payload}, ensure_ascii=False, sort_keys=True)
@@ -78,7 +80,15 @@ class LLMNewsScorer:
         total_news = sum(len(v) for v in context.get("per_ticker_news", {}).values()) + len(context.get("marketwide_news", []))
         if total_news <= 0:
             return {
-                ticker: {"bullish_score": 0.5, "confidence": 0.0, "relation_strength": 0.0, "reason": "no known same-day news"}
+                ticker: {
+                    "bullish_score": 0.5,
+                    "confidence": 0.0,
+                    "relation_strength": 0.0,
+                    "direct_effect": "none",
+                    "marketwide_effect": "none",
+                    "already_priced_risk": 0.5,
+                    "reason": "no known same-day news",
+                }
                 for ticker in tickers
             }
         payload = self._prompt_payload(context, tickers)
@@ -88,7 +98,15 @@ class LLMNewsScorer:
             return self._normalize(parsed, tickers)
         if self.client is None:
             return {
-                ticker: {"bullish_score": 0.5, "confidence": 0.0, "relation_strength": 0.0, "reason": "POLZA_AI_API_KEY missing"}
+                ticker: {
+                    "bullish_score": 0.5,
+                    "confidence": 0.0,
+                    "relation_strength": 0.0,
+                    "direct_effect": "none",
+                    "marketwide_effect": "none",
+                    "already_priced_risk": 0.5,
+                    "reason": "POLZA_AI_API_KEY missing",
+                }
                 for ticker in tickers
             }
         last_error = ""
@@ -112,15 +130,45 @@ class LLMNewsScorer:
                 last_error = str(exc)
                 time.sleep(0.5 * (attempt + 1))
         return {
-            ticker: {"bullish_score": 0.5, "confidence": 0.0, "relation_strength": 0.0, "reason": f"llm fallback: {last_error}"}
+            ticker: {
+                "bullish_score": 0.5,
+                "confidence": 0.0,
+                "relation_strength": 0.0,
+                "direct_effect": "none",
+                "marketwide_effect": "none",
+                "already_priced_risk": 0.5,
+                "reason": f"llm fallback: {last_error}",
+            }
             for ticker in tickers
         }
 
     def _prompt_payload(self, context: dict[str, Any], tickers: tuple[str, ...]) -> dict[str, Any]:
         return {
-            "task": "For each ticker, score expected intraday bullish impact from known news only. 0=strong bearish, 0.5=neutral, 1=strong bullish.",
+            "prompt_version": PROMPT_VERSION,
+            "task": (
+                "Score expected intraday bullish impact for each ticker from known same-day news only. "
+                "Use only news where received_at is not after rebalance_timestamp. Return strict JSON only."
+            ),
+            "rubric": [
+                "Default to 0.5 neutral when evidence is ambiguous, weak, stale, or already priced.",
+                "Do not use future news, title-text guesses outside the provided ticker/marketwide context, or price action after rebalance_timestamp.",
+                "Direct company news can have stronger impact than cluster news; cluster/weak relation must be discounted.",
+                "Marketwide news should affect broad MOEX/exporter/bank/oil/metals risk only when the connection is explicit.",
+                "Consider source_count/source quality and recency by received_at; older same-day news should be treated as more likely priced in.",
+                "Do not assign scores <=0.2 or >=0.8 unless the news is fresh, material, directly connected, and the reason names the causal mechanism.",
+                "If bullish and bearish items conflict, move toward neutral and lower confidence.",
+                "Set already_priced_risk high when the item was published/received much earlier or looks like a repeated/clustered story.",
+            ],
             "schema": {
-                ticker: {"bullish_score": "0..1", "confidence": "0..1", "relation_strength": "0..1", "reason": "short"}
+                ticker: {
+                    "bullish_score": "0..1, 0.5 neutral",
+                    "confidence": "0..1",
+                    "relation_strength": "0..1",
+                    "direct_effect": "bullish|bearish|neutral|none",
+                    "marketwide_effect": "bullish|bearish|neutral|none",
+                    "already_priced_risk": "0..1",
+                    "reason": "short, concrete, no hidden chain-of-thought",
+                }
                 for ticker in tickers
             },
             "tickers": list(tickers),
@@ -140,6 +188,9 @@ class LLMNewsScorer:
                 "bullish_score": _clip(item.get("bullish_score", 0.5), 0.5),
                 "confidence": _clip(item.get("confidence", 0.0), 0.0),
                 "relation_strength": _clip(item.get("relation_strength", 0.0), 0.0),
+                "direct_effect": str(item.get("direct_effect", "none"))[:80],
+                "marketwide_effect": str(item.get("marketwide_effect", "none"))[:80],
+                "already_priced_risk": _clip(item.get("already_priced_risk", 0.5), 0.5),
                 "reason": str(item.get("reason", ""))[:500],
             }
         return out

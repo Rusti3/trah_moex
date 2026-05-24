@@ -79,6 +79,7 @@ def make_decision(
 
     blended: dict[str, float] = {}
     source_parts: list[str] = []
+    selector_targets_by_name: dict[str, dict[str, float]] = {}
     for selector_name, selector_weight in selector_weights.items():
         decision = base_decisions[selector_name]
         if decision.target_weights is not None:
@@ -97,11 +98,14 @@ def make_decision(
                 source=selector_name,
             )
             selector_targets = {p.ticker: p.weight for p in positions}
+        selector_targets_by_name[selector_name] = selector_targets
         source_parts.append(f"{selector_name}:{selector_weight:.6f}")
         for ticker, weight in selector_targets.items():
             blended[ticker] = blended.get(ticker, 0.0) + selector_weight * weight
 
+    conflict_metrics = family_conflict_metrics(selector_weights, selector_targets_by_name)
     normalized = normalize_gross(blended, max_gross=max_gross)
+    conflict_metrics["gross_after_normalization"] = sum(abs(value) for value in normalized.values())
     return DecisionResult(
         as_of=as_of,
         selector_weights=selector_weights,
@@ -111,5 +115,57 @@ def make_decision(
             "lookback": selector.lookback,
             "rank_power": selector.rank_power,
             "selector_weight_debug": ";".join(source_parts),
+            "family_conflict": conflict_metrics,
         },
     )
+
+
+def family_conflict_metrics(
+    selector_weights: Mapping[str, float],
+    selector_targets_by_name: Mapping[str, Mapping[str, float]],
+) -> dict[str, Any]:
+    contributions: dict[str, dict[str, float]] = {}
+    gross_before = 0.0
+    for selector_name, targets in selector_targets_by_name.items():
+        selector_weight = float(selector_weights.get(selector_name, 0.0) or 0.0)
+        for ticker, raw_weight in targets.items():
+            contribution = selector_weight * float(raw_weight or 0.0)
+            if abs(contribution) < 1e-12:
+                continue
+            contributions.setdefault(str(ticker), {})[selector_name] = contribution
+            gross_before += abs(contribution)
+
+    blended_by_ticker = {
+        ticker: sum(parts.values())
+        for ticker, parts in contributions.items()
+    }
+    gross_after_blend = sum(abs(value) for value in blended_by_ticker.values())
+    conflict_rows = []
+    for ticker, parts in contributions.items():
+        positives = [value for value in parts.values() if value > 0]
+        negatives = [value for value in parts.values() if value < 0]
+        if not positives or not negatives:
+            continue
+        positive_abs = sum(positives)
+        negative_abs = abs(sum(negatives))
+        cancelled = min(positive_abs, negative_abs) * 2.0
+        conflict_rows.append(
+            {
+                "ticker": ticker,
+                "long_contribution": positive_abs,
+                "short_contribution": negative_abs,
+                "net": blended_by_ticker[ticker],
+                "cancelled_weight_abs": cancelled,
+                "contributions": parts,
+            }
+        )
+    conflict_rows.sort(key=lambda row: float(row["cancelled_weight_abs"]), reverse=True)
+    return {
+        "conflict_tickers_count": len(conflict_rows),
+        "conflict_tickers": conflict_rows[:10],
+        "gross_before_blend": gross_before,
+        "gross_after_blend": gross_after_blend,
+        "gross_after_normalization": gross_after_blend,
+        "cancelled_weight_abs": max(gross_before - gross_after_blend, 0.0),
+        "per_ticker_contribution": contributions,
+    }

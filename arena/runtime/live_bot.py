@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .arena_go_client import ArenaGoClient
-from .decision import make_decision
+from .decision import family_conflict_metrics, make_decision
 from .feature_builder import build_live_features
 from .history_bootstrap import HistoryBootstrapService
 from .jsonl_logger import JsonlLogger
@@ -390,7 +390,15 @@ class ArenaLiveBot:
         except Exception as exc:
             llm_task.cancel()
             llm_raw = {
-                ticker: {"bullish_score": 0.5, "confidence": 0.0, "reason": f"llm timeout: {exc}"}
+                ticker: {
+                    "bullish_score": 0.5,
+                    "confidence": 0.0,
+                    "relation_strength": 0.0,
+                    "direct_effect": "none",
+                    "marketwide_effect": "none",
+                    "already_priced_risk": 0.5,
+                    "reason": f"llm timeout: {exc}",
+                }
                 for ticker in self.settings.tickers
             }
             self.logger.write("llm_fallback", {"as_of": as_of_s, "error": str(exc)})
@@ -421,6 +429,11 @@ class ArenaLiveBot:
                     "rows": len(cost_depth),
                     "tradable": sum(1 for row in cost_depth.values() if row.get("tradable", True)),
                     "priced": sum(1 for row in cost_depth.values() if float(row.get("last_price", 0.0) or 0.0) > 0),
+                    "source_quality_counts": _counts(str(row.get("source_quality", "unknown")) for row in cost_depth.values()),
+                    "liquidity_degraded": sum(1 for row in cost_depth.values() if row.get("liquidity_degraded", False)),
+                    "missing_bbo": sum(1 for row in cost_depth.values() if row.get("missing_bbo", False)),
+                    "depth_unknown": sum(1 for row in cost_depth.values() if row.get("depth_unknown", False)),
+                    "max_estimated_cost_pct": max([float(row.get("estimated_cost_pct", 0.0) or 0.0) for row in cost_depth.values()] or [0.0]),
                     "moex_ready_ms": _elapsed_ms(run_started),
                 },
             )
@@ -448,7 +461,11 @@ class ArenaLiveBot:
         )
 
         base_decisions = self._build_base_decisions(as_of, kronos_scores, llm_scores, cost_depth)
-        self.logger.write("base_decisions_ready", {"as_of": as_of_s, "summary": _base_decision_summary(base_decisions)})
+        base_conflict = _base_conflict_summary(base_decisions)
+        self.logger.write(
+            "base_decisions_ready",
+            {"as_of": as_of_s, "summary": _base_decision_summary(base_decisions), "base_conflict": base_conflict},
+        )
         lightgbm_result = None
         selector_weights_override = None
         if self.live_selector_mode == "lightgbm_rank_weighted":
@@ -497,6 +514,7 @@ class ArenaLiveBot:
             prices=prices,
             equity=equity,
             cash_balance=cash_balance,
+            cost_depth=cost_depth,
         )
         cash_after_planned_buys = cash_balance - sum(o.order_value for o in planned if o.direction == "B")
         self.logger.write(
@@ -526,6 +544,14 @@ class ArenaLiveBot:
                         "cash_before_order": o.cash_before_order,
                         "cash_after_order": o.cash_after_order,
                         "cap_reason": o.cap_reason,
+                        "liquidity_cap_reason": o.liquidity_cap_reason,
+                        "expected_cost_pct": o.expected_cost_pct,
+                        "bbo_spread_pct": o.bbo_spread_pct,
+                        "liquidity_source": o.liquidity_source,
+                        "source_quality": o.source_quality,
+                        "liquidity_degraded": o.liquidity_degraded,
+                        "depth_shortfall": o.depth_shortfall,
+                        "depth_unknown": o.depth_unknown,
                     }
                     for o in planned
                 ],
@@ -561,12 +587,14 @@ class ArenaLiveBot:
             "portfolio_value_for_targets": equity,
             "cash_after_planned_buys": max(cash_after_planned_buys, 0.0),
             "target_positions": decision.to_order_targets(),
+            "decision_metadata": dict(decision.metadata),
             "orders": order_results,
             "news_rows": news_rows,
             "news_tagging": tag_result,
             "latency_ms": _elapsed_ms(run_started),
         }
         self.state.insert_decision(decision_id, as_of_s, payload)
+        self.logger.write("decision_conflict", {"decision_id": decision_id, "as_of": as_of_s, **dict(decision.metadata.get("family_conflict", {}))})
         self.logger.write("decision", payload)
         self._last_successful_decision = as_of_s
         self._emit_health(reason="decision")
@@ -699,6 +727,10 @@ def _base_decision_summary(base_decisions: dict[str, dict[str, Any]]) -> dict[st
             "long": sum(1 for value in weights.values() if value > 0),
             "short": sum(1 for value in weights.values() if value < 0),
             "gross": sum(abs(value) for value in weights.values()),
+            "rebalance_minutes": row.get("rebalance_minutes", 30),
+            "scenario_family": row.get("scenario_family", ""),
+            "source_scenario_id": row.get("source_scenario_id", ""),
+            "held_from_previous_rebalance": bool(row.get("held_from_previous_rebalance", False)),
             "top_longs": [
                 {"ticker": ticker, "weight": weight}
                 for ticker, weight in sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
@@ -713,11 +745,36 @@ def _base_decision_summary(base_decisions: dict[str, dict[str, Any]]) -> dict[st
     return out
 
 
+def _base_conflict_summary(base_decisions: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    selector_count = max(len(base_decisions), 1)
+    weights = {selector: 1.0 / selector_count for selector in base_decisions}
+    targets = {
+        selector: {str(k): float(v) for k, v in (row.get("target_weights") or {}).items()}
+        for selector, row in base_decisions.items()
+    }
+    metrics = family_conflict_metrics(weights, targets)
+    return {
+        "conflict_tickers_count": metrics["conflict_tickers_count"],
+        "cancelled_weight_abs": metrics["cancelled_weight_abs"],
+        "gross_before_blend": metrics["gross_before_blend"],
+        "gross_after_blend": metrics["gross_after_blend"],
+        "top_conflicts": metrics["conflict_tickers"][:5],
+    }
+
+
 def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     out: dict[str, int] = {}
     for row in rows:
         status = str(row.get("status", "unknown"))
         out[status] = out.get(status, 0) + 1
+    return out
+
+
+def _counts(values) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for value in values:
+        key = str(value)
+        out[key] = out.get(key, 0) + 1
     return out
 
 

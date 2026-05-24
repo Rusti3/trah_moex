@@ -253,7 +253,15 @@ class HistoryBootstrapService:
                 self.tickers,
             )
             llm_raw = {
-                ticker: {"bullish_score": 0.5, "confidence": 0.0, "relation_strength": 0.0, "reason": "history bootstrap neutral"}
+                ticker: {
+                    "bullish_score": 0.5,
+                    "confidence": 0.0,
+                    "relation_strength": 0.0,
+                    "direct_effect": "none",
+                    "marketwide_effect": "none",
+                    "already_priced_risk": 0.5,
+                    "reason": "history bootstrap neutral",
+                }
                 for ticker in self.tickers
             }
             cost_depth = {

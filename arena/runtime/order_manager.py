@@ -28,6 +28,14 @@ class PlannedOrder:
     cash_before_order: float | None = None
     cash_after_order: float | None = None
     cap_reason: str = ""
+    liquidity_cap_reason: str = ""
+    expected_cost_pct: float = 0.0
+    bbo_spread_pct: float = 0.0
+    liquidity_source: str = ""
+    source_quality: str = ""
+    liquidity_degraded: bool = False
+    depth_shortfall: bool = False
+    depth_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -115,6 +123,7 @@ class OrderManager:
         prices: Mapping[str, float],
         equity: float,
         cash_balance: float | None = None,
+        cost_depth: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[PlannedOrder]:
         target_by_ticker = {p.ticker: p.weight for p in decision.target_positions}
         tickers = sorted(set(positions) | set(target_by_ticker))
@@ -145,6 +154,7 @@ class OrderManager:
                     "price": price,
                     "target_weight": target_weight,
                     "lot_size": lot,
+                    "liquidity": (cost_depth or {}).get(ticker, {}),
                 }
             )
         candidates.sort(key=lambda row: (0 if row["direction"] == "S" else 1, -abs(float(row["target_weight"])), str(row["ticker"])))
@@ -158,12 +168,26 @@ class OrderManager:
             cash_after = buy_cash_remaining
             price = float(row["price"])
             lot = int(row["lot_size"])
+            liquidity = row.get("liquidity") if isinstance(row.get("liquidity"), Mapping) else {}
+            liquidity_quantity, liquidity_reason, liquidity_diag = _cap_by_liquidity(
+                liquidity,
+                direction=str(row["direction"]),
+                requested_quantity=requested_quantity,
+                current_position=int(row["current_position"]),
+                requested_target_position=int(row["requested_target_position"]),
+                lot_size=lot,
+                price=price,
+                equity=equity,
+            )
+            if liquidity_quantity < quantity:
+                quantity = max(liquidity_quantity, 0)
+                cap_reason = _append_reason(cap_reason, liquidity_reason)
             if row["direction"] == "B":
                 lot_value = lot * price
                 affordable_lots = int(math.floor(buy_cash_remaining / lot_value)) if lot_value > 0 else 0
                 if affordable_lots < requested_quantity:
-                    quantity = max(affordable_lots, 0)
-                    cap_reason = "cash_cap"
+                    quantity = min(quantity, max(affordable_lots, 0))
+                    cap_reason = _append_reason(cap_reason, "cash_cap")
                 order_value = quantity * lot_value
                 cash_after = max(buy_cash_remaining - order_value, 0.0)
                 if quantity <= 0 or order_value < self.min_order_value_rub:
@@ -195,6 +219,14 @@ class OrderManager:
                     cash_before_order=cash_before,
                     cash_after_order=cash_after,
                     cap_reason=cap_reason,
+                    liquidity_cap_reason=liquidity_reason,
+                    expected_cost_pct=float(liquidity_diag.get("expected_cost_pct", 0.0)),
+                    bbo_spread_pct=float(liquidity_diag.get("bbo_spread_pct", 0.0)),
+                    liquidity_source=str(liquidity_diag.get("source", "")),
+                    source_quality=str(liquidity_diag.get("source_quality", "")),
+                    liquidity_degraded=bool(liquidity_diag.get("liquidity_degraded", False)),
+                    depth_shortfall=bool(liquidity_diag.get("depth_shortfall", False)),
+                    depth_unknown=bool(liquidity_diag.get("depth_unknown", False)),
                 )
             )
         return planned
@@ -251,6 +283,14 @@ class OrderManager:
                     "cash_before_order": order.cash_before_order,
                     "cash_after_order": order.cash_after_order,
                     "cap_reason": order.cap_reason,
+                    "liquidity_cap_reason": order.liquidity_cap_reason,
+                    "expected_cost_pct": order.expected_cost_pct,
+                    "bbo_spread_pct": order.bbo_spread_pct,
+                    "liquidity_source": order.liquidity_source,
+                    "source_quality": order.source_quality,
+                    "liquidity_degraded": order.liquidity_degraded,
+                    "depth_shortfall": order.depth_shortfall,
+                    "depth_unknown": order.depth_unknown,
                     "status": "duplicate_skipped" if not inserted else status,
                     "error": error,
                     "response": response_payload,
@@ -267,6 +307,124 @@ def _shares_to_lots(shares: float, lot: int) -> int:
         return 0
     sign = 1 if shares > 0 else -1
     return sign * int(math.floor(abs(shares) / lot))
+
+
+def _cap_by_liquidity(
+    liquidity: Mapping[str, Any],
+    *,
+    direction: str,
+    requested_quantity: int,
+    current_position: int,
+    requested_target_position: int,
+    lot_size: int,
+    price: float,
+    equity: float,
+) -> tuple[int, str, dict[str, Any]]:
+    side = "ask" if direction == "B" else "bid"
+    levels = liquidity.get(f"{side}_levels") or []
+    diag = {
+        "source": liquidity.get("source", ""),
+        "source_quality": liquidity.get("source_quality", ""),
+        "liquidity_degraded": bool(liquidity.get("liquidity_degraded", False)),
+        "depth_shortfall": bool(liquidity.get("depth_shortfall", False)),
+        "depth_unknown": bool(liquidity.get("depth_unknown", False)),
+        "bbo_spread_pct": _float(liquidity.get("bbo_spread_pct"), 0.0),
+        "expected_cost_pct": _float(liquidity.get("estimated_cost_pct"), 0.0),
+    }
+    risk_increasing = _is_risk_increasing(current_position, requested_target_position)
+    quantity = int(requested_quantity)
+    reason = ""
+
+    if levels:
+        vwap_cost, max_lots, shortfall = _estimate_order_cost_from_levels(
+            levels,
+            side=side,
+            requested_lots=requested_quantity,
+            lot_size=lot_size,
+            fallback_price=price,
+            mid_price=_float(liquidity.get("mid_price"), price),
+        )
+        diag["expected_cost_pct"] = max(vwap_cost, diag["expected_cost_pct"])
+        diag["depth_shortfall"] = shortfall
+        if max_lots < requested_quantity:
+            quantity = max(max_lots, 0)
+            reason = _append_reason(reason, "depth_cap" if max_lots > 0 else "depth_shortfall")
+    elif risk_increasing and bool(liquidity.get("liquidity_degraded") or liquidity.get("missing_bbo") or liquidity.get("unknown_cost")):
+        max_value = max(float(equity), 0.0) * 0.20
+        lot_value = max(price * lot_size, 0.0)
+        max_lots = int(math.floor(max_value / lot_value)) if lot_value > 0 else 0
+        if max_lots < requested_quantity:
+            quantity = max(max_lots, 0)
+            reason = _append_reason(reason, "degraded_liquidity_cap" if max_lots > 0 else "degraded_liquidity_skip")
+
+    return quantity, reason, diag
+
+
+def _estimate_order_cost_from_levels(
+    levels: list[Mapping[str, Any]],
+    *,
+    side: str,
+    requested_lots: int,
+    lot_size: int,
+    fallback_price: float,
+    mid_price: float,
+) -> tuple[float, int, bool]:
+    requested_shares = max(int(requested_lots), 0) * max(int(lot_size), 1)
+    if requested_shares <= 0:
+        return 0.0, 0, False
+    remaining = requested_shares
+    notional = 0.0
+    filled = 0.0
+    available_shares = 0.0
+    for level in levels:
+        price = _float(level.get("price"), 0.0)
+        quantity = _float(level.get("quantity"), 0.0)
+        if price <= 0 or quantity <= 0:
+            continue
+        available_shares += quantity
+        take = min(quantity, remaining)
+        notional += take * price
+        filled += take
+        remaining -= take
+        if remaining <= 0:
+            break
+    max_lots = int(math.floor(available_shares / max(int(lot_size), 1)))
+    if filled <= 0:
+        return 0.0, max_lots, True
+    vwap = notional / filled
+    reference = mid_price if mid_price > 0 else fallback_price
+    if reference <= 0:
+        return 0.0, max_lots, remaining > 0
+    cost = (vwap - reference) / reference if side == "ask" else (reference - vwap) / reference
+    return max(float(cost), 0.0), max_lots, remaining > 0
+
+
+def _is_risk_increasing(current: int, target: int) -> bool:
+    if target == current:
+        return False
+    if current == 0:
+        return target != 0
+    if (current > 0 and target > 0) or (current < 0 and target < 0):
+        return abs(target) > abs(current)
+    return target != 0
+
+
+def _append_reason(existing: str, reason: str) -> str:
+    if not reason:
+        return existing
+    if not existing:
+        return reason
+    if reason in existing.split("+"):
+        return existing
+    return f"{existing}+{reason}"
+
+
+def _float(value: Any, default: float) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return default
+    return out if math.isfinite(out) else default
 
 
 def _idempotency_key(decision_id: str, request: Mapping[str, Any]) -> str:
