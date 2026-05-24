@@ -313,6 +313,7 @@ def main() -> None:
     settings = load_settings(args.config)
     bot = ArenaLiveBot(settings)
     if args.once:
+        bot.initialize()
         as_of = datetime.fromisoformat(args.as_of) if args.as_of else now_msk()
         print(json.dumps(asyncio.run(bot.run_once(as_of)), ensure_ascii=False, indent=2, default=str))
         return
