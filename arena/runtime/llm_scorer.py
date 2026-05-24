@@ -39,7 +39,7 @@ class LLMNewsScorer:
         *,
         cache_path: str | Path,
         base_url: str = "https://polza.ai/api/v1",
-        model: str = "deepseek/deepseek-v4-flash",
+        model: str = "deepseek/deepseek-v4-pro",
         api_key_env: str = "POLZA_AI_API_KEY",
         timeout: float = 60.0,
         retries: int = 2,

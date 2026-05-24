@@ -3,13 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from arena.runtime.feature_builder import build_live_features
 from arena.runtime.lightgbm_selector import rank_weights_from_scores
 from arena.runtime import RollingRankWeightedSelector, build_target_weights, make_decision
-from arena.runtime.llm_scorer import LLMNewsScorer
+from arena.runtime.llm_scorer import LLMNewsScorer, _hash_payload
 from arena.runtime.order_manager import OrderManager
 from arena.runtime.schemas import DecisionResult, TargetPosition
+from arena.runtime.settings import load_settings
 
 
 class RuntimeTests(unittest.TestCase):
@@ -154,6 +156,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("SBER", payload["schema"])
         self.assertIn("LKOH", payload["schema"])
 
+    def test_settings_default_polza_model_is_pro(self):
+        with patch.dict("os.environ", {}, clear=True):
+            settings = load_settings("arena/config/production.yaml")
+        self.assertEqual(settings.polza_model, "deepseek/deepseek-v4-pro")
+
+    def test_llm_cache_key_depends_on_model(self):
+        payload = {"tickers": ["SBER"], "per_ticker_news": {"SBER": []}}
+        self.assertNotEqual(
+            _hash_payload("deepseek/deepseek-v4-flash", payload),
+            _hash_payload("deepseek/deepseek-v4-pro", payload),
+        )
+
     def test_order_manager_sends_lots_not_shares_for_lot_tickers(self):
         manager = OrderManager(
             client=None,
@@ -170,11 +184,93 @@ class RuntimeTests(unittest.TestCase):
                 TargetPosition("SBER", "long", 0.10, 0.10),
             ),
         )
-        planned = {order.ticker: order for order in manager.plan_orders(decision, positions={}, prices={"ALRS": 25.0, "SBER": 300.0}, equity=100000.0)}
+        planned = {
+            order.ticker: order
+            for order in manager.plan_orders(
+                decision,
+                positions={},
+                prices={"ALRS": 25.0, "SBER": 300.0},
+                equity=100000.0,
+                cash_balance=100000.0,
+            )
+        }
         self.assertEqual(planned["ALRS"].quantity, 200)  # 2,000 shares / lot size 10
         self.assertEqual(planned["ALRS"].target_position, 200)
         self.assertEqual(planned["ALRS"].lot_size, 10)
         self.assertEqual(planned["SBER"].quantity, 33)
+
+    def test_order_manager_reads_cash_balance_from_bots(self):
+        class Client:
+            def bots(self):
+                class Response:
+                    ok = True
+                    payload = [{"name": "test", "cash_balance": 123456.78}]
+                return Response()
+
+        manager = OrderManager(
+            client=Client(),
+            state=None,
+            bot_name="test",
+            lot_sizes={"SBER": 1},
+            live_orders=False,
+        )
+        self.assertEqual(manager.bot_snapshot().cash_balance, 123456.78)
+
+    def test_order_manager_caps_buy_by_cash_balance(self):
+        manager = OrderManager(
+            client=None,
+            state=None,
+            bot_name="test",
+            lot_sizes={"ALRS": 10},
+            live_orders=False,
+        )
+        decision = DecisionResult(
+            as_of="2026-05-24 12:31:30",
+            selector_weights={},
+            target_positions=(TargetPosition("ALRS", "long", 1.0, 1.0),),
+        )
+        planned = manager.plan_orders(
+            decision,
+            positions={},
+            prices={"ALRS": 25.0},
+            equity=1000000.0,
+            cash_balance=500000.0,
+        )
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0].requested_quantity, 4000)
+        self.assertEqual(planned[0].quantity, 2000)
+        self.assertEqual(planned[0].capped_quantity, 2000)
+        self.assertEqual(planned[0].cap_reason, "cash_cap")
+        self.assertEqual(planned[0].cash_after_order, 0.0)
+
+    def test_sells_do_not_fund_buy_budget_in_same_batch(self):
+        manager = OrderManager(
+            client=None,
+            state=None,
+            bot_name="test",
+            lot_sizes={"ALRS": 10, "SBER": 1},
+            live_orders=False,
+        )
+        decision = DecisionResult(
+            as_of="2026-05-24 12:31:30",
+            selector_weights={},
+            target_positions=(TargetPosition("ALRS", "long", 1.0, 1.0),),
+        )
+        planned = {
+            order.ticker: order
+            for order in manager.plan_orders(
+                decision,
+                positions={"SBER": 10},
+                prices={"ALRS": 10.0, "SBER": 100.0},
+                equity=2000.0,
+                cash_balance=1000.0,
+            )
+        }
+        self.assertEqual(planned["SBER"].direction, "S")
+        self.assertEqual(planned["SBER"].quantity, 10)
+        self.assertEqual(planned["ALRS"].requested_quantity, 20)
+        self.assertEqual(planned["ALRS"].quantity, 10)
+        self.assertEqual(planned["ALRS"].cap_reason, "cash_cap")
 
     def test_order_manager_equity_uses_gross_lot_value(self):
         class Client:

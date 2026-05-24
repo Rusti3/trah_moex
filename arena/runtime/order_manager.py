@@ -16,11 +16,25 @@ class PlannedOrder:
     ticker: str
     direction: str
     quantity: int  # ArenaGo quantity is lots.
+    requested_quantity: int  # lots requested before cash capping.
+    capped_quantity: int  # final lots after cash capping.
     current_position: int  # lots
     target_position: int  # lots
+    requested_target_position: int  # lots before cash capping.
     price: float
     target_weight: float
     lot_size: int
+    order_value: float
+    cash_before_order: float | None = None
+    cash_after_order: float | None = None
+    cap_reason: str = ""
+
+
+@dataclass(frozen=True)
+class BotSnapshot:
+    name: str
+    cash_balance: float
+    raw: Mapping[str, Any] | None = None
 
 
 class OrderManager:
@@ -60,13 +74,38 @@ class OrderManager:
                 out[ticker] = 0
         return out
 
-    def estimate_equity(self, positions: Mapping[str, int], prices: Mapping[str, float]) -> float:
-        cash = self._cash_balance()
+    def bot_snapshot(self) -> BotSnapshot:
+        if self.client is None:
+            return BotSnapshot(name=self.bot_name, cash_balance=0.0, raw=None)
+        response = self.client.bots()
+        if not response.ok:
+            return BotSnapshot(name=self.bot_name, cash_balance=0.0, raw=None)
+        rows = response.payload if isinstance(response.payload, list) else response.payload.get("bots", [])
+        for row in rows or []:
+            if str(row.get("name")) == self.bot_name:
+                try:
+                    cash = float(row.get("cash_balance", 0.0))
+                except Exception:
+                    cash = 0.0
+                return BotSnapshot(name=self.bot_name, cash_balance=max(cash, 0.0), raw=row)
+        return BotSnapshot(name=self.bot_name, cash_balance=0.0, raw=None)
+
+    def cash_balance(self) -> float:
+        return self.bot_snapshot().cash_balance
+
+    def estimate_equity(
+        self,
+        positions: Mapping[str, int],
+        prices: Mapping[str, float],
+        *,
+        cash_balance: float | None = None,
+    ) -> float:
+        cash = self.cash_balance() if cash_balance is None else max(float(cash_balance), 0.0)
         gross = sum(
             abs(int(lots)) * self.lot_sizes.get(ticker, 1) * float(prices.get(ticker, 0.0) or 0.0)
             for ticker, lots in positions.items()
         )
-        return max(cash + gross, 0.0) if cash > 0 else max(gross, 100000.0)
+        return max(cash + gross, 0.0) if cash > 0 or gross > 0 else 100000.0
 
     def plan_orders(
         self,
@@ -75,10 +114,11 @@ class OrderManager:
         positions: Mapping[str, int],
         prices: Mapping[str, float],
         equity: float,
+        cash_balance: float | None = None,
     ) -> list[PlannedOrder]:
         target_by_ticker = {p.ticker: p.weight for p in decision.target_positions}
         tickers = sorted(set(positions) | set(target_by_ticker))
-        planned = []
+        candidates = []
         for ticker in tickers:
             price = float(prices.get(ticker, 0.0) or 0.0)
             if price <= 0:
@@ -91,19 +131,70 @@ class OrderManager:
             delta = target_lots - current
             if delta == 0:
                 continue
-            quantity = abs(delta)
-            if quantity * lot * price < self.min_order_value_rub:
+            requested_quantity = abs(delta)
+            requested_order_value = requested_quantity * lot * price
+            if requested_order_value < self.min_order_value_rub:
                 continue
+            candidates.append(
+                {
+                    "ticker": ticker,
+                    "direction": "B" if delta > 0 else "S",
+                    "requested_quantity": requested_quantity,
+                    "current_position": current,
+                    "requested_target_position": target_lots,
+                    "price": price,
+                    "target_weight": target_weight,
+                    "lot_size": lot,
+                }
+            )
+        candidates.sort(key=lambda row: (0 if row["direction"] == "S" else 1, -abs(float(row["target_weight"])), str(row["ticker"])))
+        buy_cash_remaining = self.cash_balance() if cash_balance is None else max(float(cash_balance), 0.0)
+        planned: list[PlannedOrder] = []
+        for row in candidates:
+            requested_quantity = int(row["requested_quantity"])
+            quantity = requested_quantity
+            cap_reason = ""
+            cash_before = buy_cash_remaining
+            cash_after = buy_cash_remaining
+            price = float(row["price"])
+            lot = int(row["lot_size"])
+            if row["direction"] == "B":
+                lot_value = lot * price
+                affordable_lots = int(math.floor(buy_cash_remaining / lot_value)) if lot_value > 0 else 0
+                if affordable_lots < requested_quantity:
+                    quantity = max(affordable_lots, 0)
+                    cap_reason = "cash_cap"
+                order_value = quantity * lot_value
+                cash_after = max(buy_cash_remaining - order_value, 0.0)
+                if quantity <= 0 or order_value < self.min_order_value_rub:
+                    buy_cash_remaining = cash_after
+                    continue
+                buy_cash_remaining = cash_after
+            else:
+                order_value = quantity * lot * price
+                if quantity <= 0 or order_value < self.min_order_value_rub:
+                    continue
+                cash_before = None
+                cash_after = None
+            current = int(row["current_position"])
+            target_position = current + quantity if row["direction"] == "B" else current - quantity
             planned.append(
                 PlannedOrder(
-                    ticker=ticker,
-                    direction="B" if delta > 0 else "S",
+                    ticker=str(row["ticker"]),
+                    direction=str(row["direction"]),
                     quantity=quantity,
+                    requested_quantity=requested_quantity,
+                    capped_quantity=quantity,
                     current_position=current,
-                    target_position=target_lots,
+                    target_position=target_position,
+                    requested_target_position=int(row["requested_target_position"]),
                     price=price,
-                    target_weight=target_weight,
+                    target_weight=float(row["target_weight"]),
                     lot_size=lot,
+                    order_value=order_value,
+                    cash_before_order=cash_before,
+                    cash_after_order=cash_after,
+                    cap_reason=cap_reason,
                 )
             )
         return planned
@@ -150,6 +241,16 @@ class OrderManager:
                     "ticker": order.ticker,
                     "direction": order.direction,
                     "quantity": order.quantity,
+                    "requested_lots": order.requested_quantity,
+                    "capped_lots": order.capped_quantity,
+                    "current_lots": order.current_position,
+                    "target_lots": order.target_position,
+                    "requested_target_lots": order.requested_target_position,
+                    "lot_size": order.lot_size,
+                    "order_value": order.order_value,
+                    "cash_before_order": order.cash_before_order,
+                    "cash_after_order": order.cash_after_order,
+                    "cap_reason": order.cap_reason,
                     "status": "duplicate_skipped" if not inserted else status,
                     "error": error,
                     "response": response_payload,
@@ -158,17 +259,7 @@ class OrderManager:
         return results
 
     def _cash_balance(self) -> float:
-        response = self.client.bots()
-        if not response.ok:
-            return 0.0
-        rows = response.payload if isinstance(response.payload, list) else response.payload.get("bots", [])
-        for row in rows or []:
-            if str(row.get("name")) == self.bot_name:
-                try:
-                    return float(row.get("cash_balance", 0.0))
-                except Exception:
-                    return 0.0
-        return 0.0
+        return self.cash_balance()
 
 
 def _shares_to_lots(shares: float, lot: int) -> int:

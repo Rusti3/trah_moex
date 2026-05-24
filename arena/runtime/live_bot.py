@@ -125,6 +125,9 @@ class ArenaLiveBot:
         positions = self.order_manager.reconcile_positions()
         self.logger.write("positions_reconciled", {"positions_count": len(positions), "positions": positions})
 
+    def shutdown(self) -> None:
+        self.news_ingestion.stop_background()
+
     async def run_forever(self) -> None:
         self.initialize()
         while True:
@@ -290,13 +293,25 @@ class ArenaLiveBot:
         )
         decision_id = _decision_id(as_of_s, decision.selector_weights)
         positions = self.order_manager.reconcile_positions()
-        equity = self.order_manager.estimate_equity(positions, prices)
-        planned = self.order_manager.plan_orders(decision, positions=positions, prices=prices, equity=equity)
+        bot_snapshot = self.order_manager.bot_snapshot()
+        cash_balance = bot_snapshot.cash_balance
+        equity = self.order_manager.estimate_equity(positions, prices, cash_balance=cash_balance)
+        planned = self.order_manager.plan_orders(
+            decision,
+            positions=positions,
+            prices=prices,
+            equity=equity,
+            cash_balance=cash_balance,
+        )
+        cash_after_planned_buys = cash_balance - sum(o.order_value for o in planned if o.direction == "B")
         self.logger.write(
             "orders_planned",
             {
                 "as_of": as_of_s,
                 "equity": equity,
+                "cash_balance": cash_balance,
+                "portfolio_value_for_targets": equity,
+                "cash_after_planned_buys": max(cash_after_planned_buys, 0.0),
                 "positions_count": len(positions),
                 "planned_count": len(planned),
                 "live_orders": self.settings.live_orders,
@@ -305,9 +320,17 @@ class ArenaLiveBot:
                         "ticker": o.ticker,
                         "direction": o.direction,
                         "quantity_lots": o.quantity,
+                        "requested_lots": o.requested_quantity,
+                        "capped_lots": o.capped_quantity,
                         "lot_size": o.lot_size,
                         "current_lots": o.current_position,
                         "target_lots": o.target_position,
+                        "requested_target_lots": o.requested_target_position,
+                        "price": o.price,
+                        "order_value": o.order_value,
+                        "cash_before_order": o.cash_before_order,
+                        "cash_after_order": o.cash_after_order,
+                        "cap_reason": o.cap_reason,
                     }
                     for o in planned
                 ],
@@ -335,6 +358,9 @@ class ArenaLiveBot:
                 "scores": lightgbm_result.selector_scores if lightgbm_result is not None else {},
                 "reason": lightgbm_result.reason if lightgbm_result is not None else "",
             },
+            "cash_balance": cash_balance,
+            "portfolio_value_for_targets": equity,
+            "cash_after_planned_buys": max(cash_after_planned_buys, 0.0),
             "target_positions": decision.to_order_targets(),
             "orders": order_results,
             "news_rows": news_rows,
@@ -447,8 +473,11 @@ def main() -> None:
     bot = ArenaLiveBot(settings)
     if args.once:
         bot.initialize()
-        as_of = datetime.fromisoformat(args.as_of) if args.as_of else now_msk()
-        print(json.dumps(asyncio.run(bot.run_once(as_of)), ensure_ascii=False, indent=2, default=str))
+        try:
+            as_of = datetime.fromisoformat(args.as_of) if args.as_of else now_msk()
+            print(json.dumps(asyncio.run(bot.run_once(as_of)), ensure_ascii=False, indent=2, default=str))
+        finally:
+            bot.shutdown()
         return
     asyncio.run(bot.run_forever())
 

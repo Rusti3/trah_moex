@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -155,7 +155,7 @@ class LLMNewsTagger:
         database_path: str | Path,
         *,
         base_url: str = "https://polza.ai/api/v1",
-        model: str = "deepseek/deepseek-v4-flash",
+        model: str = "deepseek/deepseek-v4-pro",
         api_key_env: str = "POLZA_AI_API_KEY",
         timeout: float = 60.0,
         retries: int = 2,
@@ -383,6 +383,9 @@ class NewsIngestionService:
     sources_config_path: Path
     tickers_config_path: Path
     bootstrap_enabled: bool = True
+    _stop_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _scheduler: Any | None = field(default=None, init=False, repr=False)
 
     def settings(self) -> Settings:
         return Settings(
@@ -401,9 +404,21 @@ class NewsIngestionService:
         ensure_live_news_schema(settings.database_path)
 
     def start_background(self) -> threading.Thread:
+        self._stop_event.clear()
         thread = threading.Thread(target=self._run_forever, name="news-ingestion", daemon=True)
         thread.start()
+        self._thread = thread
         return thread
+
+    def stop_background(self, timeout: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._scheduler is not None:
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def _run_forever(self) -> None:
         asyncio.run(self._run_async())
@@ -416,12 +431,17 @@ class NewsIngestionService:
         if settings.bootstrap_enabled:
             await pipeline.bootstrap()
         scheduler = create_scheduler(pipeline)
+        self._scheduler = scheduler
         scheduler.start()
         try:
-            while True:
-                await asyncio.sleep(3600)
+            while not self._stop_event.is_set():
+                await asyncio.sleep(1)
         finally:
-            scheduler.shutdown(wait=False)
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            self._scheduler = None
 
 
 def seed_regex_tags_as_llm_tags(database_path: str | Path) -> int:
